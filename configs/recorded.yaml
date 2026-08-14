@@ -1,0 +1,22 @@
+artifact_schema_version: 1
+
+provider:
+  kind: recorded
+  model: recorded-test-model
+  recorded_responses: tests/fixtures/recorded-responses.jsonl
+  temperature: 0.0
+  max_output_tokens: 8192
+
+workflow:
+  max_html_bytes: 5000000
+  max_repair_attempts: 2
+
+execution:
+  timeout_seconds: 5.0
+  memory_mb: 512
+  max_source_bytes: 100000
+  max_output_bytes: 16384
+
+diagnostics:
+  enabled: false
+  model: gemini-3.6-flash

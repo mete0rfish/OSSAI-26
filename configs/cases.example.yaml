@@ -1,0 +1,5 @@
+cases:
+  - id: operating-profit
+    html_path: local-data/example.html
+    question: "2025년 연결 영업이익은 얼마인가?"
+    expected: "123,456백만원"
