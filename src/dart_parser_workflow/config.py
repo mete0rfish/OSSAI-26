@@ -34,28 +34,12 @@ class ProviderSettings(SettingsModel):
 
 class WorkflowSettings(SettingsModel):
     max_html_bytes: int = Field(default=5_000_000, gt=0)
-    max_repair_attempts: int = Field(default=2, ge=0, le=5)
-
-
-class ExecutionSettings(SettingsModel):
-    timeout_seconds: float = Field(default=5.0, gt=0, le=60)
-    memory_mb: int = Field(default=512, ge=64, le=4096)
-    max_source_bytes: int = Field(default=100_000, gt=0)
-    max_output_bytes: int = Field(default=16_384, gt=0)
-
-
-class DiagnosticSettings(SettingsModel):
-    enabled: bool = True
-    model: str = Field(default="gemini-3.6-flash", min_length=1)
-    api_key_env: str = Field(default="GEMINI_API_KEY", min_length=1)
 
 
 class AppSettings(SettingsModel):
-    artifact_schema_version: Literal[1] = 1
+    artifact_schema_version: Literal[2] = 2
     provider: ProviderSettings
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
-    execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
-    diagnostics: DiagnosticSettings = Field(default_factory=DiagnosticSettings)
 
 
 def load_settings(path: str | Path) -> AppSettings:

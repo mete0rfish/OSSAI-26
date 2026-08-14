@@ -1,4 +1,4 @@
-artifact_schema_version: 1
+artifact_schema_version: 2
 
 provider:
   kind: gemini
@@ -9,14 +9,3 @@ provider:
 
 workflow:
   max_html_bytes: 5000000
-  max_repair_attempts: 2
-
-execution:
-  timeout_seconds: 5.0
-  memory_mb: 512
-  max_source_bytes: 100000
-  max_output_bytes: 16384
-
-diagnostics:
-  enabled: true
-  model: gemini-3.6-flash

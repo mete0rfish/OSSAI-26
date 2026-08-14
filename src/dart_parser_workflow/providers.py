@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 
 from .config import ProviderSettings
-from .schemas import GeneratedParser, GenerationRequest, ModelUsage, ProviderResponse
+from .schemas import DisclosureAnswer, GenerationRequest, ModelUsage, ProviderResponse
 
 
 class ModelProvider(Protocol):
@@ -37,17 +37,17 @@ class GeminiProvider:
                 temperature=self.settings.temperature,
                 max_output_tokens=self.settings.max_output_tokens,
                 response_mime_type="application/json",
-                response_schema=GeneratedParser,
+                response_schema=DisclosureAnswer,
             ),
         )
         latency = time.monotonic() - started
         parsed = response.parsed
-        if isinstance(parsed, GeneratedParser):
-            generated = parsed
+        if isinstance(parsed, DisclosureAnswer):
+            result = parsed
         elif parsed is not None:
-            generated = GeneratedParser.model_validate(parsed)
+            result = DisclosureAnswer.model_validate(parsed)
         else:
-            generated = GeneratedParser.model_validate_json(response.text)
+            result = DisclosureAnswer.model_validate_json(response.text)
 
         metadata = getattr(response, "usage_metadata", None)
         usage = ModelUsage(
@@ -55,7 +55,7 @@ class GeminiProvider:
             output_tokens=getattr(metadata, "candidates_token_count", None),
         )
         return ProviderResponse(
-            code=generated.code,
+            result=result,
             requested_model=self.settings.model,
             actual_model=getattr(response, "model_version", None) or self.settings.model,
             usage=usage,
@@ -64,18 +64,18 @@ class GeminiProvider:
 
 
 class RecordedProvider:
-    """`sample_id`와 시도 번호로 저장된 코드를 재생한다."""
+    """`sample_id`로 저장된 구조화 답변을 재생한다."""
 
     def __init__(self, path: str | Path, model: str) -> None:
         self.model = model
-        self.responses: dict[tuple[str, int], str] = {}
+        self.responses: dict[tuple[str, int], DisclosureAnswer] = {}
         with Path(path).open(encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
                     continue
                 row = json.loads(line)
                 key = (str(row["sample_id"]), int(row.get("attempt", 0)))
-                self.responses[key] = GeneratedParser.model_validate(row["response"]).code
+                self.responses[key] = DisclosureAnswer.model_validate(row["response"])
 
     def generate(self, request: GenerationRequest) -> ProviderResponse:
         started = time.monotonic()
@@ -83,7 +83,7 @@ class RecordedProvider:
         if key not in self.responses:
             raise KeyError(f"저장 응답이 없습니다: sample_id={key[0]}, attempt={key[1]}")
         return ProviderResponse(
-            code=self.responses[key],
+            result=self.responses[key],
             requested_model=self.model,
             actual_model=self.model,
             latency_seconds=time.monotonic() - started,
