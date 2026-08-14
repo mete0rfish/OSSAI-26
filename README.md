@@ -121,4 +121,28 @@ uv run --locked pytest
 ```
 
 실제 Gemini 통합 실행은 비용과 외부 전송이 발생하므로 자동 테스트에 포함하지 않는다.
-MVP 범위에는 DART URL 크롤링, 복수 필드 JSON, 표 전체 추출, 웹 UI가 포함되지 않는다.
+파서 workflow 자체에는 DART URL 크롤링, 복수 필드 JSON, 표 전체 추출, 웹 UI가 포함되지
+않는다. DART HTML 원문 수집은 저장소에 함께 포함된 별도 driver를 사용한다.
+
+## DART HTML 원문 수집
+
+원격에서 추가된 `dart-html-fetch/driver`는 DART 공시 URL에서 메인 또는 상세 HTML을 받아
+정리한 뒤 로컬 파일로 저장한다. 의존성을 설치한 후 다음처럼 실행한다.
+
+```bash
+python -m pip install -r dart-html-fetch/driver/requirements.txt
+python dart-html-fetch/driver/main.py \
+  --url "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=<접수번호>" \
+  --out "local-data/disclosure.html"
+```
+
+driver의 옵션과 주의사항은 [`dart-html-fetch/SKILL.md`](dart-html-fetch/SKILL.md)를 참고한다.
+수집한 HTML 경로와 질문·정답을 사례 YAML에 넣어 위 파서 생성·검증 workflow를 실행한다.
+
+## 모델 비교 방향
+
+현재 구현된 provider는 `gemini-3.6-flash`와 오프라인 저장 응답이다. 이후 동일한 평가 사례와
+결정론 채점 조건에서 다음 모델을 비교하고, 사례별 실패 결과를 바탕으로 프롬프트를 수정한다.
+
+- `gemini/gemini-3.5-flash-lite`
+- `nvidia_nim/google/gemma-4-31b-it`
