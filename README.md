@@ -4,6 +4,8 @@ DART 공시 HTML과 자연어 질문을 Gemini에 전달하고, 모델이 질문
 원문 근거를 정확히 찾는지 검증하는 로컬 실험 프로젝트다. 파싱 코드는 생성하거나 실행하지
 않는다.
 
+현재 코드의 단계별 동작은 [`docs/workflow.md`](docs/workflow.md)에서 확인할 수 있다.
+
 `OSSAI-26-1`의 검증 가능한 AI workflow 구조를 참고하며 다음 기술을 사용한다.
 
 - Python 3.14
