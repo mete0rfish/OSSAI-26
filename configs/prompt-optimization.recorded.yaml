@@ -1,0 +1,45 @@
+artifact_schema_version: 3
+baseline_prompt: prompts/dart-qa-baseline.md
+
+target_provider:
+  kind: recorded
+  model: recorded-target-v3
+  recorded_responses: tests/fixtures/v3-recorded-responses.jsonl
+  temperature: 0.0
+  max_output_tokens: 8192
+
+optimizer_provider:
+  kind: recorded
+  model: recorded-optimizer-v3
+  recorded_responses: tests/fixtures/v3-recorded-responses.jsonl
+  temperature: 0.0
+  max_output_tokens: 8192
+
+target_limits:
+  max_requests: 20
+  max_attempts: 20
+  max_input_tokens: 100000
+  max_output_tokens: 10000
+  max_wall_seconds: 300
+
+optimizer_limits:
+  max_requests: 2
+  max_attempts: 2
+  max_input_tokens: 50000
+  max_output_tokens: 5000
+  max_wall_seconds: 300
+
+selection:
+  min_mean_improvement: 0.01
+
+dataset:
+  split_counts:
+    development: 2
+    validation: 2
+    test: 2
+  minimum_tag_counts:
+    answerable: 3
+    unanswerable: 3
+
+workflow:
+  max_html_bytes: 5000000

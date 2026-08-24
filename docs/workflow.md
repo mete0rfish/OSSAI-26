@@ -100,8 +100,8 @@ decoded = UnicodeDammit(raw, is_html=True).unicode_markup
 ```
 
 이 단계에서는 파일 존재 여부, 최대 크기와 문자 인코딩을 확인한다. 현재 workflow는 DART
-서버에서 공시를 직접 내려받지 않는다. `dart-html-fetch/driver`로 수집한 로컬 HTML을 입력으로
-사용한다.
+서버에서 공시를 직접 내려받지 않는다. `.claude/skills/dart-html-fetch/driver`로 수집한 로컬
+HTML을 입력으로 사용한다.
 
 ## 4. 프롬프트 구성
 
@@ -247,3 +247,83 @@ uv run --locked python scripts/run_workflow.py \
 
 이를 더 엄격히 평가하려면 평가 사례에 기대 근거를 추가하거나 질문과 인용문의 의미적
 관련성을 별도로 채점하는 단계가 필요하다.
+
+## v3 프롬프트 최적화 흐름
+
+v3는 위 v2 흐름을 교체하지 않고 별도 CLI로 제공한다.
+
+```text
+v3 JSONL 사전 검사
+→ development baseline 실행
+→ strict 실패만 optimizer에 전달
+→ validation에서 baseline/candidate 비교 및 rollback
+→ 선택 완료 후 test 실행
+→ selected prompt로 사람이 검토한 HTML 변형 평가
+```
+
+### 데이터와 채점
+
+각 사례에는 `family_id`, 명시적 split, HTML SHA-256, 출처와 질문 metadata, 구조화된 expected,
+tags가 필요하다. 같은 family가 여러 split에 있거나 기대 인용이 실제 HTML 화면 텍스트에 없으면
+모델 호출 전에 실패한다.
+
+answerable 점수는 정답 60%, 문서에 있는 근거 15%, 근거 안의 답 10%, 기대 문맥 anchor 15%다.
+strict pass는 네 조건을 모두 만족해야 한다. unanswerable은 정확한 `답변 보류`, 보류 flag,
+빈 evidence와 보류 이유를 모두 만족할 때만 1점이다.
+
+### 역할과 선택 경계
+
+- target provider는 질문과 HTML만 받아 답과 근거를 만든다.
+- optimizer provider는 baseline과 development 실패 기록만 받아 후보를 제안한다.
+- selector는 validation 결과만 받아 동일 후보, 오류 증가, answerable 보류 증가, strict pass rate
+  감소를 차례로 차단하고 최소 평균 개선 폭까지 확인한다.
+- test는 selector가 반환한 뒤에만 실행되며 summary에
+  `test_used_for_generation_or_selection=false`가 기록된다.
+
+live CLI의 `--target-model`, `--optimizer-model`은 YAML의 역할별 모델명을 실행 단위로
+덮어쓴다. `--target-api-key-env`, `--optimizer-api-key-env`은 API 키 자체가 아니라 키가 저장된
+환경변수 이름만 받는다. 덮어쓴 요청 모델과 API가 반환한 실제 모델은 기존과 같이 호출 ledger와
+summary에 기록된다. 서로 다른 모델을 비교할 때는 dataset, prompt, temperature와 실행 한도를
+고정하고 실행별로 새 출력 디렉터리를 사용한다.
+
+사람 승인 전 모델 응답을 비교하는 `probe_dart_qa_model.py`는 `expected` 필드를 금지하는 별도
+입력 schema를 사용한다. target에는 질문과 HTML만 전달하고 optimizer·정답 채점·prompt 선택은
+실행하지 않는다. 응답의 인용이 현재 HTML에 있는지와 답이 인용에 포함되는지만 결정론적으로
+기록한다. 기본 development 외 split은 사용자가 명시적으로 선택해야 한다.
+
+Ollama provider는 설정의 `base_url`(기본 `http://localhost:11434`)에 있는 native
+`POST /api/chat`을 사용한다. 요청은 `stream=false`, `think=false`이며 Pydantic JSON Schema를
+`format`에 전달한다. temperature는 Ollama option의 `temperature`, 출력 한도는 `num_predict`로
+매핑한다. 응답의 `message.content`를 같은 Pydantic schema로 검증하고 `prompt_eval_count`,
+`eval_count`를 token 사용량으로 기록한다. 로컬 Ollama에는 API 키를 요구하지 않는다.
+
+Ollama Cloud 직접 API는 `base_url=https://ollama.com`과 `api_key_env=OLLAMA_API_KEY`를 사용한다.
+Cloud는 structured outputs를 지원하지 않으므로 `format`을 보내지 않고 JSON Schema를 system
+지시문으로 전달한다. 반환값은 로컬 경로와 동일한 Pydantic schema로 엄격하게 검증하며, 형식이
+맞지 않으면 임의 보정하지 않고 `generation_error`로 기록한다.
+
+NVIDIA NIM provider는 hosted API 기본 주소 `https://integrate.api.nvidia.com/v1`의 OpenAI 호환
+`POST /chat/completions`를 사용한다. `api_key_env`의 환경변수 값을 Bearer token으로만 전송하며
+설정·명령행·artifact에는 키 값을 기록하지 않는다. 반환 schema 지시는 system message로 전달하고,
+assistant의 `choices[0].message.content`를 `DisclosureAnswer` 또는 `PromptCandidate`로 엄격하게
+검증한다. `usage.prompt_tokens`, `usage.completion_tokens`와 API가 반환한 실제 모델 ID를 ledger에
+기록한다. provider 종류를 CLI에서 `nvidia_nim`으로 바꾸고 키 변수명을 생략하면
+`NVIDIA_NIM_API_KEY`와 hosted 기본 주소를 사용한다. 다른 NIM 호환 endpoint는 역할별
+`--target-base-url` 또는 `--optimizer-base-url`로 덮어쓴다.
+
+NIM 설정의 선택적 `top_p`는 chat completion의 같은 필드로 전달한다. `enable_thinking`을 지정하면
+`chat_template_kwargs.enable_thinking`으로 전달한다. 모델별 권장값이 다르므로 API Catalog의 해당
+모델 페이지를 확인하고, 공정한 비교에서는 실행별 값을 lineage 설정과 함께 고정한다. Gemma 4
+NIM target과 Gemini optimizer의 실행 가능한 조합은
+`configs/prompt-optimization.gemma4-nim-gemini.yaml`에 기록되어 있다.
+
+### 계보와 완결성
+
+호출 로그에는 전체 HTML·prompt 대신 prompt/HTML SHA-256, 역할, sample, 모델, token, 비용,
+지연과 오류가 남는다. summary는 Git, dataset, split IDs, prompt, scorer와 HTML hash를 기록한다.
+robustness는 optimization의 Git·dataset·selected prompt·scorer hash가 현재 입력과 모두 일치할
+때만 실행한다.
+
+모든 예정 사례가 시도되고 artifact가 생성되면 `complete`, 호출 전에 provider를 준비하지
+못하면 `not_run`, 중단·예산 소진·계보 불일치는 `partial`이다. 이 값은 모델 품질의
+`pass/fail/inconclusive`와 별개다.

@@ -1,0 +1,41 @@
+artifact_schema_version: 3
+baseline_prompt: prompts/dart-qa-baseline.md
+
+target_provider:
+  kind: gemini
+  model: gemini-3.7-flash
+  api_key_env: GEMINI_API_KEY
+  temperature: 0.0
+  max_output_tokens: 8192
+
+optimizer_provider:
+  kind: nvidia_nim
+  model: nvidia/nemotron-3-ultra-550b-a55b
+  api_key_env: GEMINI_API_KEY
+  temperature: 0.0
+  max_output_tokens: 8192
+
+target_limits:
+  max_requests: 200
+  max_attempts: 200
+  max_input_tokens: 2000000
+  max_output_tokens: 100000
+  max_wall_seconds: 7200
+  # 비용 상한을 사용할 때는 실행 당일 확인한 pricing과 max_cost_usd를 함께 추가한다.
+
+optimizer_limits:
+  max_requests: 4
+  max_attempts: 4
+  max_input_tokens: 100000
+  max_output_tokens: 20000
+  max_wall_seconds: 1800
+
+selection:
+  min_mean_improvement: 0.01
+
+dataset:
+  split_counts: {}
+  minimum_tag_counts: {}
+
+workflow:
+  max_html_bytes: 5000000

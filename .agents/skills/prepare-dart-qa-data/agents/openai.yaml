@@ -1,0 +1,4 @@
+interface:
+  display_name: "DART QA 데이터 준비"
+  short_description: "DART HTML을 검증 가능한 QA v3 데이터셋으로 준비"
+  default_prompt: "Use $prepare-dart-qa-data to prepare a human-reviewed and validated DART QA v3 dataset."
