@@ -129,6 +129,18 @@ class OptimizationSettings(SettingsModel):
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
 
 
+class FixedPromptBenchmarkSettings(SettingsModel):
+    """optimizer 없이 고정 프롬프트를 target 하나에 평가하는 설정."""
+
+    artifact_schema_version: Literal[3] = 3
+    prompt_path: str = Field(min_length=1)
+    prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target_provider: ProviderSettings
+    target_limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
+    dataset: DatasetRequirements = Field(default_factory=DatasetRequirements)
+    workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
+
+
 def load_settings(path: str | Path) -> AppSettings:
     value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     return AppSettings.model_validate(value)
@@ -137,6 +149,41 @@ def load_settings(path: str | Path) -> AppSettings:
 def load_optimization_settings(path: str | Path) -> OptimizationSettings:
     value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     return OptimizationSettings.model_validate(value)
+
+
+def load_fixed_prompt_benchmark_settings(
+    path: str | Path,
+) -> FixedPromptBenchmarkSettings:
+    value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    return FixedPromptBenchmarkSettings.model_validate(value)
+
+
+def override_fixed_prompt_provider(
+    settings: FixedPromptBenchmarkSettings,
+    *,
+    target_kind: ProviderKind | None = None,
+    target_model: str | None = None,
+    target_api_key_env: str | None = None,
+    target_base_url: str | None = None,
+) -> FixedPromptBenchmarkSettings:
+    """고정 프롬프트 benchmark target 설정만 안전하게 교체한다."""
+
+    provider = settings.target_provider.model_dump()
+    if target_kind is not None:
+        provider["kind"] = target_kind
+        if target_kind != settings.target_provider.kind and target_base_url is None:
+            provider["base_url"] = _default_base_url(target_kind)
+        if target_kind == "nvidia_nim" and target_api_key_env is None:
+            provider["api_key_env"] = "NVIDIA_NIM_API_KEY"
+    if target_model is not None:
+        provider["model"] = target_model
+    if target_api_key_env is not None:
+        provider["api_key_env"] = target_api_key_env
+    if target_base_url is not None:
+        provider["base_url"] = target_base_url
+    value = settings.model_dump()
+    value["target_provider"] = ProviderSettings.model_validate(provider).model_dump()
+    return FixedPromptBenchmarkSettings.model_validate(value)
 
 
 def override_optimization_providers(

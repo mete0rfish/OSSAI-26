@@ -1,0 +1,26 @@
+artifact_schema_version: 3
+prompt_path: reports/prompt-optimization/ollama-cloud-nim-20260824-01/selected-prompt.md
+prompt_sha256: 9d24e442571204775807875888c401b241fa325450e23585485bd6dd52dc7954
+
+target_provider:
+  kind: ollama
+  model: qwen3.5:cloud
+  api_key_env: OLLAMA_API_KEY
+  base_url: https://ollama.com
+  request_timeout_seconds: 300
+  temperature: 0.0
+  max_output_tokens: 8192
+
+target_limits:
+  max_requests: 40
+  max_attempts: 40
+  max_input_tokens: 2000000
+  max_output_tokens: 100000
+  max_wall_seconds: 7200
+
+dataset:
+  split_counts: {}
+  minimum_tag_counts: {}
+
+workflow:
+  max_html_bytes: 5000000

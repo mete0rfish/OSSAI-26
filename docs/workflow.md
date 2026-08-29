@@ -311,6 +311,42 @@ assistant의 `choices[0].message.content`를 `DisclosureAnswer` 또는 `PromptCa
 `NVIDIA_NIM_API_KEY`와 hosted 기본 주소를 사용한다. 다른 NIM 호환 endpoint는 역할별
 `--target-base-url` 또는 `--optimizer-base-url`로 덮어쓴다.
 
+## 고정 프롬프트 target benchmark
+
+`scripts/benchmark_fixed_prompt.py`는 승인된 v3 dataset과 고정 프롬프트를 target 모델 하나에
+실행한다. prompt optimization과 달리 optimizer provider를 설정·생성·호출하지 않고 candidate와
+selection도 만들지 않는다.
+
+실행 전에 다음 순서로 입력을 검증한다.
+
+1. prompt에 `{question}`과 `{html}`이 각각 정확히 한 번 있는지 확인
+2. 실제 prompt SHA-256이 설정의 `prompt_sha256`과 같은지 확인
+3. dataset ID, family split, HTML hash, 기대 근거와 문맥 anchor 검증
+4. 선택 split과 sample ID가 유효한지 확인
+5. 아직 존재하지 않는 output 디렉터리 생성
+
+target request에는 렌더링된 질문과 HTML만 포함된다. expected, accepted answers, 기대 인용과 문맥
+anchor는 Python scorer에서만 사용된다. `run_case_v3`와 `score_answer_v3`를 재사용하므로 기존
+optimization과 answer/evidence 판정 기준이 같다.
+
+결과 디렉터리는 다음 artifact를 만든다.
+
+```text
+reports/model-benchmarks/<run-id>/
+├── calls.jsonl
+├── fixed-prompt.md
+├── results.jsonl
+└── summary.json
+```
+
+`summary.json`은 `expected_answers_sent_to_provider=false`, `optimizer_used=false`,
+`candidate_generated=false`를 기록한다. 전체와 split별 exact answer, evidence grounding, context,
+strict pass, abstention, unsafe answer, 오류, latency와 provider 사용량을 집계한다. 모든 예정 사례를
+시도했으면 응답 오류가 있어도 실행 상태는 `complete`일 수 있고, 품질 상태는 별도로 판정한다.
+
+현재처럼 이미 공개된 Test를 포함한 30개 전체 실행은 `fixed_prompt_exploratory`로 기록한다. 이
+결과를 prompt 생성이나 최종 성능 주장에 재사용하지 않는다.
+
 NIM 설정의 선택적 `top_p`는 chat completion의 같은 필드로 전달한다. `enable_thinking`을 지정하면
 `chat_template_kwargs.enable_thinking`으로 전달한다. 모델별 권장값이 다르므로 API Catalog의 해당
 모델 페이지를 확인하고, 공정한 비교에서는 실행별 값을 lineage 설정과 함께 고정한다. Gemma 4

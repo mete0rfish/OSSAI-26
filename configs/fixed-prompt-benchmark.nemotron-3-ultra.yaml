@@ -1,0 +1,28 @@
+artifact_schema_version: 3
+prompt_path: reports/prompt-optimization/ollama-cloud-nim-20260824-01/selected-prompt.md
+prompt_sha256: 9d24e442571204775807875888c401b241fa325450e23585485bd6dd52dc7954
+
+target_provider:
+  kind: nvidia_nim
+  model: nvidia/nemotron-3-ultra-550b-a55b
+  api_key_env: NVIDIA_NIM_API_KEY
+  base_url: https://integrate.api.nvidia.com/v1
+  request_timeout_seconds: 300
+  temperature: 1.0
+  top_p: 0.95
+  enable_thinking: true
+  max_output_tokens: 16384
+
+target_limits:
+  max_requests: 40
+  max_attempts: 40
+  max_input_tokens: 2000000
+  max_output_tokens: 200000
+  max_wall_seconds: 7200
+
+dataset:
+  split_counts: {}
+  minimum_tag_counts: {}
+
+workflow:
+  max_html_bytes: 5000000

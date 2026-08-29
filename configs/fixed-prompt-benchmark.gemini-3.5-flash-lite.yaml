@@ -1,0 +1,30 @@
+artifact_schema_version: 3
+prompt_path: reports/prompt-optimization/ollama-cloud-nim-20260824-01/selected-prompt.md
+prompt_sha256: 9d24e442571204775807875888c401b241fa325450e23585485bd6dd52dc7954
+
+target_provider:
+  kind: gemini
+  model: gemini-3.5-flash-lite
+  api_key_env: GEMINI_API_KEY
+  request_timeout_seconds: 300
+  temperature: 0.0
+  max_output_tokens: 8192
+
+target_limits:
+  max_requests: 40
+  max_attempts: 40
+  max_input_tokens: 2000000
+  max_output_tokens: 100000
+  max_cost_usd: 3.0
+  max_wall_seconds: 7200
+  pricing:
+    verified_on: 2026-08-25
+    input_usd_per_million_tokens: 0.30
+    output_usd_per_million_tokens: 2.50
+
+dataset:
+  split_counts: {}
+  minimum_tag_counts: {}
+
+workflow:
+  max_html_bytes: 5000000
