@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
-from dart_parser_workflow.config import load_optimization_settings
+from dart_parser_workflow.config import load_dataset_validation_settings
 from dart_parser_workflow.dataset import dataset_sha256, load_cases_v3
 
 
@@ -16,12 +16,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-root", default=".")
     args = parser.parse_args(argv)
     root = Path(args.project_root).resolve()
-    settings = load_optimization_settings(args.config)
+    workflow, requirements = load_dataset_validation_settings(args.config)
     cases = load_cases_v3(
         args.cases,
         root,
-        max_html_bytes=settings.workflow.max_html_bytes,
-        requirements=settings.dataset,
+        max_html_bytes=workflow.max_html_bytes,
+        requirements=requirements,
     )
     print(
         json.dumps(

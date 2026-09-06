@@ -58,12 +58,15 @@ v2는 다음 규칙을 강화했다.
 
 남은 작업:
 
-1. 새 Validation에 unanswerable family 보강
-2. 외부 전송과 비용 승인
-3. 세 모델에 v1/v2 조합 실행
-4. Validation으로 모델·prompt 조합 하나 선택
-5. 새로운 family로 최종 Test 작성·검토
-6. 선택 조합만 Test에 한 번 실행
+1. 사용자가 제공할 공개 DART 목록을 신규 family로 배치
+2. 36건 작성·사람 검토
+3. 외부 전송과 비용 승인
+4. `run_submission_workflow.py`로 Ollama Pro 6조합과 격리 Test 실행
+
+2026-09-02 현재 통합 제출 실행기, 36건 구성 검증, 모델 ID 사전점검, 자동 rollback/선택,
+Test 기대 정답 비공개 산출물과 recorded E2E는 구현됐다. 질문 계약 v1은 2026-09-03에 사용자가
+승인했다. 공식 수치가 없는 상태를 완료로 표시하지 않으며 [최종 보고서](final-report.md)는 실행
+대기 상태를 명시한다.
 
 실행법은 [다중 모델 벤치마크 가이드](multi-model-benchmark-guide.md), 평가 규칙은
 [워크플로](workflow.md)를 참고한다.

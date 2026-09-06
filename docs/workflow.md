@@ -161,3 +161,60 @@ dataset, HTML, prompt, scorer의 SHA-256과 제한된 호출 metadata를 남긴�
 | 품질 | `pass`, `fail`, `inconclusive` |
 
 기존 output 디렉터리는 덮어쓰거나 재개하지 않는다. 부분 실행을 보존하고 새 run ID를 사용한다.
+
+## 제출용 다중 모델 선택 워크플로
+
+`scripts/run_submission_workflow.py`는 이미 Development 실패로 작성·승인된 두 고정 prompt를
+입력으로 받는다. Candidate 생성은 이 명령에서 하지 않으므로 Validation/Test 정보가 optimizer로
+전달될 경로가 없다.
+
+```text
+36건 dataset 계약 검증
+→ Ollama /api/tags exact ID + 구조화 응답 사전 점검
+→ Validation: 3 model × baseline/candidate
+→ 모델별 candidate rollback gate
+→ Validation 지표로 조합 하나 선택, selection.json 저장
+→ 선택 조합만 Test 12건 1회
+→ comparison.md와 summary.json 저장
+```
+
+Candidate는 같은 모델의 baseline보다 오류, unsafe answer, answerable 보류가 늘지 않고 strict pass
+rate가 낮아지지 않으며 평균 점수가 설정값 이상 개선될 때만 최종 순위 후보가 된다. Gate를 통과한
+candidate와 세 baseline을 strict pass, 평균 점수, 오류, unsafe answer, answerable 보류 순으로
+비교한다. 모든 candidate가 탈락하면 baseline 조합 중 하나로 자동 rollback한다. Test는
+`selection.json`이 저장된 뒤 실행하며 선택 함수에는 전달하지 않는다.
+
+제출 설정은 다음 데이터 조건도 사전 검증한다.
+
+- Development/Validation/Test `12/12/12`, answerable `7/7/8`
+- split별 최소 3 family와 family split 격리
+- 승인 대상 9개 metric이 모든 split에 존재
+- 각 split에 세 공시 유형, 다섯 답 유형, table/narrative tag가 존재
+- expected answerability와 `answerable`/`unanswerable` tag 일치
+- review JSONL의 case hash, reviewer, 승인 결정과 다섯 확인 항목 완료
+
+Live 설정은 Ollama Pro로 고정되고 `/api/tags`에 세 정확한 ID가 모두 있어야 한다. 각 모델은 실제
+Validation 전에 `DisclosureAnswer` JSON 구조화 응답 smoke test를 통과해야 한다. CLI는
+`--authorize-external-transmission`이 없으면 live provider를 호출하지 않는다.
+Ollama 응답 전체가 단일 `json` 코드 블록인 경우에는 바깥쪽 블록만 제거하고 동일한 Pydantic
+schema 검증을 적용한다. 코드 블록 밖 설명, 잘못된 JSON, schema 불일치는 허용하지 않는다.
+
+```text
+reports/submission/<run-id>/
+├── calls.jsonl
+├── preflight.json
+├── validation/
+│   └── <model>.<baseline|candidate>.jsonl
+├── selection.json
+├── selected-prompt.md
+├── test.jsonl
+├── comparison.md
+└── summary.json
+```
+
+`test.jsonl`에는 점수와 모델 출력은 기록하지만 비공개 `expected` 객체는 기록하지 않는다.
+
+공식 실행 뒤의 후속 프롬프트 개선도 Development로 되돌아가서 시작한다. Validation/Test의 질문,
+정답, 개별 실패나 결과 수치는 새 후보 생성에 사용하지 않는다. 새 후보는 고정 프롬프트
+Development benchmark에서 baseline과 먼저 비교하고, 안전 조건을 통과한 경우에만 새로운
+Validation 실행 승인을 받는다.

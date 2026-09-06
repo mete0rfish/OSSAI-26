@@ -108,12 +108,45 @@ class DatasetRequirements(SettingsModel):
         default_factory=dict
     )
     minimum_tag_counts: dict[str, int] = Field(default_factory=dict)
+    answerable_counts: dict[Literal["development", "validation", "test"], int] = Field(
+        default_factory=dict
+    )
+    minimum_family_counts: dict[
+        Literal["development", "validation", "test"], int
+    ] = Field(default_factory=dict)
+    minimum_tag_counts_by_split: dict[
+        Literal["development", "validation", "test"], dict[str, int]
+    ] = Field(default_factory=dict)
+    required_metrics: list[str] = Field(default_factory=list)
+    unique_metric_count: int | None = Field(default=None, gt=0)
+    require_metrics_in_each_split: bool = False
 
-    @field_validator("split_counts", "minimum_tag_counts")
+    @field_validator(
+        "split_counts",
+        "minimum_tag_counts",
+        "answerable_counts",
+        "minimum_family_counts",
+    )
     @classmethod
     def counts_must_be_non_negative(cls, value: dict[str, int]) -> dict[str, int]:
         if any(count < 0 for count in value.values()):
             raise ValueError("dataset 최소 개수는 음수일 수 없습니다")
+        return value
+
+    @field_validator("minimum_tag_counts_by_split")
+    @classmethod
+    def split_tag_counts_must_be_non_negative(
+        cls, value: dict[str, dict[str, int]]
+    ) -> dict[str, dict[str, int]]:
+        if any(count < 0 for counts in value.values() for count in counts.values()):
+            raise ValueError("split별 tag 최소 개수는 음수일 수 없습니다")
+        return value
+
+    @field_validator("required_metrics")
+    @classmethod
+    def required_metrics_must_be_unique(cls, value: list[str]) -> list[str]:
+        if any(not metric.strip() for metric in value) or len(value) != len(set(value)):
+            raise ValueError("required_metrics는 비어 있지 않은 고유 문자열이어야 합니다")
         return value
 
 
@@ -141,6 +174,38 @@ class FixedPromptBenchmarkSettings(SettingsModel):
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
 
 
+class SubmissionSettings(SettingsModel):
+    """세 target 모델과 두 고정 prompt를 비교하는 제출 워크플로 설정."""
+
+    artifact_schema_version: Literal[3] = 3
+    baseline_prompt: str = Field(min_length=1)
+    baseline_prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_prompt: str = Field(min_length=1)
+    candidate_prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    models: list[ProviderSettings] = Field(min_length=3, max_length=3)
+    target_limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
+    selection: SelectionSettings = Field(default_factory=SelectionSettings)
+    dataset: DatasetRequirements = Field(default_factory=DatasetRequirements)
+    workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
+
+    @model_validator(mode="after")
+    def models_must_be_unique_and_use_one_provider(self) -> SubmissionSettings:
+        model_ids = [provider.model for provider in self.models]
+        if len(model_ids) != len(set(model_ids)):
+            raise ValueError("submission models의 model ID가 중복되었습니다")
+        provider_kinds = {provider.kind for provider in self.models}
+        if len(provider_kinds) != 1:
+            raise ValueError("submission models는 하나의 provider 종류를 사용해야 합니다")
+        provider_kind = next(iter(provider_kinds))
+        if provider_kind not in {"ollama", "recorded"}:
+            raise ValueError("submission provider는 Ollama Pro 또는 offline recorded여야 합니다")
+        if provider_kind == "ollama" and any(
+            provider.base_url != "https://ollama.com" for provider in self.models
+        ):
+            raise ValueError("live submission은 Ollama Pro base URL을 사용해야 합니다")
+        return self
+
+
 def load_settings(path: str | Path) -> AppSettings:
     value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     return AppSettings.model_validate(value)
@@ -156,6 +221,24 @@ def load_fixed_prompt_benchmark_settings(
 ) -> FixedPromptBenchmarkSettings:
     value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     return FixedPromptBenchmarkSettings.model_validate(value)
+
+
+def load_submission_settings(path: str | Path) -> SubmissionSettings:
+    value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    return SubmissionSettings.model_validate(value)
+
+
+def load_dataset_validation_settings(
+    path: str | Path,
+) -> tuple[WorkflowSettings, DatasetRequirements]:
+    """Optimization 또는 submission 설정에서 dataset 검증 계약을 읽는다."""
+
+    value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if isinstance(value, dict) and "models" in value:
+        settings = SubmissionSettings.model_validate(value)
+    else:
+        settings = OptimizationSettings.model_validate(value)
+    return settings.workflow, settings.dataset
 
 
 def override_fixed_prompt_provider(

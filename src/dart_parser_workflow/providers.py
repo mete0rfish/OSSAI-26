@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -32,6 +33,20 @@ class ModelProvider(Protocol):
 
 class OptimizerProvider(Protocol):
     def propose(self, request: OptimizationRequest) -> OptimizerResponse: ...
+
+
+_JSON_CODE_FENCE = re.compile(
+    r"\A```json[ \t]*\r?\n(?P<body>.*)\r?\n```[ \t]*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _unwrap_json_code_fence(content: str) -> str:
+    stripped = content.strip()
+    match = _JSON_CODE_FENCE.fullmatch(stripped)
+    if match is None:
+        return content
+    return match.group("body")
 
 
 def _gemini_generation_config(
@@ -179,7 +194,7 @@ def _ollama_chat(
         content = value["message"]["content"]
         if not isinstance(content, str):
             raise TypeError("message.content가 문자열이 아닙니다")
-        parsed = response_model.model_validate_json(content)
+        parsed = response_model.model_validate_json(_unwrap_json_code_fence(content))
     except (KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"Ollama 구조화 응답이 유효하지 않습니다: {exc}") from exc
     return parsed, value, latency
@@ -194,6 +209,40 @@ def _ollama_api_key(settings: ProviderSettings) -> str | None:
             f"환경 변수 {settings.api_key_env}에 Ollama API 키가 없습니다"
         )
     return api_key
+
+
+def list_ollama_models(settings: ProviderSettings) -> list[str]:
+    """Ollama `/api/tags`가 반환한 정확한 model ID를 정렬해 반환한다."""
+
+    if settings.kind != "ollama":
+        raise ValueError("Ollama model 조회에는 ollama provider 설정이 필요합니다")
+    api_key = _ollama_api_key(settings)
+    headers = {"Accept": "application/json"}
+    if api_key is not None:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(
+        f"{settings.base_url}/api/tags",
+        headers=headers,
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=settings.request_timeout_seconds,
+        ) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:2000]
+        raise RuntimeError(f"Ollama model 조회 HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Ollama model 조회 실패: {exc.reason}") from exc
+    try:
+        value = json.loads(raw)
+        rows = value["models"]
+        names = [str(row.get("model") or row["name"]) for row in rows]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Ollama model 목록 응답이 유효하지 않습니다: {exc}") from exc
+    return sorted(set(names))
 
 
 class OllamaProvider:

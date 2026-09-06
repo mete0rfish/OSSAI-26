@@ -115,6 +115,43 @@ reports/prompt-optimization/<run-id>/
 상세 실행 과정과 recorded 예제의 예상 결과는
 [실행·채점 워크플로](docs/workflow.md)를 참고한다.
 
+### 제출 워크플로 한 명령 재현
+
+세 모델 × baseline/v2 Validation 비교, 자동 선택, 선택 이후 Test 1회와 보고서 생성을 한 명령으로
+실행한다. 아래 recorded 설정은 외부 호출 없이 전체 제어 흐름을 검증한다.
+
+```bash
+uv run --locked python scripts/run_submission_workflow.py \
+  --cases configs/cases.v3.example.jsonl \
+  --config configs/submission.recorded.yaml \
+  --output reports/submission/recorded-$(date +%Y%m%d-%H%M%S)
+```
+
+사람 검토가 끝난 36건 데이터와 외부 전송 승인이 준비된 뒤에는 Ollama Pro 고정 설정을 사용한다.
+`--authorize-external-transmission`은 API key가 아니라 이번 실행에서 HTML과 질문의 외부 전송을
+승인한다는 명시적 표시다.
+
+```bash
+uv run --locked python scripts/run_submission_workflow.py \
+  --cases local-data/dart-qa/cases/cases.submission.v3.jsonl \
+  --reviews local-data/dart-qa/reviews/review.submission.jsonl \
+  --config configs/submission.ollama-pro.yaml \
+  --output reports/submission/ollama-pro-$(date +%Y%m%d-%H%M%S) \
+  --authorize-external-transmission
+```
+
+Live 실행은 review의 case hash와 다섯 확인 항목이 모든 case에서 승인됐는지도 다시 검증한다.
+Ollama가 응답 전체를 단일 `json` 코드 블록으로 감싼 경우에는 바깥쪽 블록만 제거한 뒤 기존
+Pydantic schema로 검증한다. 코드 블록 밖 설명이나 schema 불일치는 계속 오류로 처리한다.
+출력은 `preflight.json`, 모델·prompt별 `validation/*.jsonl`, `selection.json`, 비공개 기대 정답을
+제외한 `test.jsonl`, `comparison.md`, `summary.json`과 최소 호출 로그를 포함한다. 기존 출력
+디렉터리는 재사용할 수 없다.
+
+공식 실행 후 프롬프트를 다시 개선할 때에는 공개된 Validation/Test 결과를 사용하지 않는다.
+`configs/development-baseline.ollama-pro.yaml`과 `configs/development-v3.ollama-pro.yaml`로 승인된
+Development 12건만 먼저 비교하며, v3가 Development 안전 조건을 통과하기 전에는 공식
+submission 후보로 승격하지 않는다.
+
 ## 제공 기능
 
 | 목적 | CLI | 설명 |
@@ -123,6 +160,7 @@ reports/prompt-optimization/<run-id>/
 | 프롬프트 최적화 | `scripts/optimize_dart_qa_prompt.py` | Development → Validation 선택/rollback → Test 실행 |
 | 정답 없는 사전 탐색 | `scripts/probe_dart_qa_model.py` | 기대 답 없이 모델 답·근거와 grounding만 기록 |
 | 고정 프롬프트 비교 | `scripts/benchmark_fixed_prompt.py` | 같은 데이터·프롬프트·채점기로 여러 target 모델 비교 |
+| 제출 자동화 | `scripts/run_submission_workflow.py` | 3모델 × 2prompt Validation 선택 후 격리 Test 1회와 보고서 생성 |
 | HTML 변형 생성 | `scripts/generate_html_variants.py` | 근거 보존·파괴 및 교란 변형 생성, 사람 검토표 출력 |
 | Robustness 평가 | `scripts/evaluate_html_robustness.py` | 보존 변형의 정답 유지와 파괴 변형의 안전 보류 확인 |
 | 기존 v2 평가 | `scripts/run_workflow.py` | YAML 기반 단일 답·근거 평가 흐름 유지 |
@@ -151,6 +189,8 @@ v3 데이터는 한 줄에 한 사례를 담는 JSONL이다. 각 사례는 다�
 실제 데이터는 작성자와 검토자를 분리해 승인한다. 데이터 준비 절차는
 [`$prepare-dart-qa-data` 스킬](.agents/skills/prepare-dart-qa-data/SKILL.md)과
 [검토 가이드](.agents/skills/prepare-dart-qa-data/references/review-guide.md)를 참고한다.
+제출용 9개 질문의 현재 초안과 승인 상태는
+[질문 계약 v1](docs/question-contracts.v1.md)에 기록한다.
 
 실행 완결성과 모델 품질은 별도로 기록한다.
 

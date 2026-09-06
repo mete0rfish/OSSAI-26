@@ -94,6 +94,64 @@ def validate_cases_v3(
                 f"tag 최소 개수를 만족하지 않습니다: {tag}={tag_counts[tag]} < {minimum}"
             )
 
+    answerable_counts = Counter(case.split for case in cases if not case.expected.abstained)
+    for split, expected_count in active.answerable_counts.items():
+        if answerable_counts[split] != expected_count:
+            raise ValueError(
+                f"{split} answerable 사례 수가 요구조건과 다릅니다: "
+                f"actual={answerable_counts[split]}, expected={expected_count}"
+            )
+
+    family_counts = Counter()
+    for _family, splits in family_splits.items():
+        family_counts[next(iter(splits))] += 1
+    for split, minimum in active.minimum_family_counts.items():
+        if family_counts[split] < minimum:
+            raise ValueError(
+                f"{split} family 최소 개수를 만족하지 않습니다: "
+                f"{family_counts[split]} < {minimum}"
+            )
+
+    for split, required_tags in active.minimum_tag_counts_by_split.items():
+        split_tag_counts = Counter(
+            tag for case in cases if case.split == split for tag in case.tags
+        )
+        for tag, minimum in required_tags.items():
+            if split_tag_counts[tag] < minimum:
+                raise ValueError(
+                    f"{split} tag 최소 개수를 만족하지 않습니다: "
+                    f"{tag}={split_tag_counts[tag]} < {minimum}"
+                )
+
+    known_metrics = {case.question_metadata.metric for case in cases}
+    if (
+        active.unique_metric_count is not None
+        and len(known_metrics) != active.unique_metric_count
+    ):
+        raise ValueError(
+            "고유 metric 수가 요구조건과 다릅니다: "
+            f"actual={len(known_metrics)}, expected={active.unique_metric_count}"
+        )
+    missing_metrics = sorted(set(active.required_metrics) - known_metrics)
+    if missing_metrics:
+        raise ValueError(f"필수 metric이 없습니다: {missing_metrics}")
+    if active.require_metrics_in_each_split:
+        for split in ("development", "validation", "test"):
+            split_metrics = {
+                case.question_metadata.metric for case in cases if case.split == split
+            }
+            missing = sorted(set(active.required_metrics) - split_metrics)
+            if missing:
+                raise ValueError(f"{split} split에 필수 metric이 없습니다: {missing}")
+
+    for case in cases:
+        expected_tag = "unanswerable" if case.expected.abstained else "answerable"
+        opposite_tag = "answerable" if case.expected.abstained else "unanswerable"
+        if expected_tag not in case.tags or opposite_tag in case.tags:
+            raise ValueError(
+                f"answerability tag가 expected와 일치하지 않습니다: {case.id}"
+            )
+
 
 def dataset_sha256(cases: list[EvaluationCaseV3], project_root: str | Path) -> str:
     root = Path(project_root).resolve()

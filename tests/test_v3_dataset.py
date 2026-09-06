@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dart_parser_workflow.config import load_optimization_settings
+from dart_parser_workflow.config import DatasetRequirements, load_optimization_settings
 from dart_parser_workflow.dataset import load_cases_v3, validate_cases_v3
 from dart_parser_workflow.prompts import render_prompt, validate_prompt_template
 
@@ -51,3 +51,45 @@ def test_prompt_renderer_allows_only_required_placeholders() -> None:
         validate_prompt_template("{question} {html} {expected}")
     with pytest.raises(ValueError, match="정확히 한 번"):
         validate_prompt_template("{question} {question} {html}")
+
+
+def test_submission_dataset_requirements_check_answerability_and_families() -> None:
+    cases = load_cases_v3(ROOT / "configs/cases.v3.example.jsonl", ROOT)
+    requirements = DatasetRequirements(
+        split_counts={"development": 2, "validation": 2, "test": 2},
+        answerable_counts={"development": 1, "validation": 1, "test": 1},
+        minimum_family_counts={"development": 2, "validation": 2, "test": 2},
+    )
+
+    validate_cases_v3(cases, max_html_bytes=5_000_000, requirements=requirements)
+
+    with pytest.raises(ValueError, match="answerable 사례 수"):
+        validate_cases_v3(
+            cases,
+            max_html_bytes=5_000_000,
+            requirements=requirements.model_copy(
+                update={"answerable_counts": {"development": 2}}
+            ),
+        )
+
+
+def test_answerability_tag_must_match_expected_contract() -> None:
+    cases = load_cases_v3(ROOT / "configs/cases.v3.example.jsonl", ROOT)
+    changed = [
+        cases[0].model_copy(update={"tags": ["unanswerable", "table"]}),
+        *cases[1:],
+    ]
+
+    with pytest.raises(ValueError, match="answerability tag"):
+        validate_cases_v3(changed, max_html_bytes=5_000_000)
+
+
+def test_unique_metric_count_is_exact() -> None:
+    cases = load_cases_v3(ROOT / "configs/cases.v3.example.jsonl", ROOT)
+
+    with pytest.raises(ValueError, match="고유 metric 수"):
+        validate_cases_v3(
+            cases,
+            max_html_bytes=5_000_000,
+            requirements=DatasetRequirements(unique_metric_count=3),
+        )
