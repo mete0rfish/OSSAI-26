@@ -54,6 +54,13 @@ class RollbackProvider:
         )
 
 
+class ValidationFailureProvider(RollbackProvider):
+    def generate(self, request: GenerationRequest) -> ProviderResponse:
+        if request.sample_id == "val-answer" and request.prompt_variant == "baseline":
+            raise TimeoutError("transient validation failure")
+        return super().generate(request)
+
+
 def _inputs():
     settings = load_submission_settings(ROOT / "configs/submission.recorded.yaml")
     cases = load_cases_v3(
@@ -165,6 +172,34 @@ def test_submission_stops_before_calls_when_exact_model_id_is_missing(
     assert not (tmp_path / "missing-model/test.jsonl").exists()
 
 
+def test_submission_validation_error_is_inconclusive_and_skips_test(
+    tmp_path: Path,
+) -> None:
+    settings, cases = _inputs()
+    providers = {
+        model.model: (
+            ValidationFailureProvider(model.model)
+            if index == 0
+            else RollbackProvider(model.model)
+        )
+        for index, model in enumerate(settings.models)
+    }
+
+    summary = run_submission_workflow(
+        cases,
+        settings,
+        tmp_path / "inconclusive",
+        ROOT,
+        providers=providers,
+        available_model_ids=list(providers),
+    )
+
+    assert summary["observed_status"] == "complete"
+    assert summary["quality_status"] == "inconclusive"
+    assert summary["selection"]["status"] == "inconclusive"
+    assert not (tmp_path / "inconclusive/test.jsonl").exists()
+
+
 def test_identical_candidate_is_automatically_rolled_back(tmp_path: Path) -> None:
     settings, cases = _inputs()
     settings = settings.model_copy(
@@ -189,7 +224,18 @@ def test_live_submission_requires_approved_review_before_output(tmp_path: Path) 
     _, cases = _inputs()
     live_settings = load_submission_settings(ROOT / "configs/submission.ollama-pro.yaml")
 
-    with pytest.raises(ValueError, match="reviews"):
+    with pytest.raises(PermissionError, match="외부 전송 승인"):
         run_submission_workflow(cases, live_settings, tmp_path / "live", ROOT)
 
     assert not (tmp_path / "live").exists()
+
+    with pytest.raises(ValueError, match="reviews"):
+        run_submission_workflow(
+            cases,
+            live_settings,
+            tmp_path / "live-reviewed",
+            ROOT,
+            authorize_external_transmission=True,
+        )
+
+    assert not (tmp_path / "live-reviewed").exists()

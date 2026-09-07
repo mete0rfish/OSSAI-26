@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output,
         root,
         reviews_path=args.reviews,
+        authorize_external_transmission=args.authorize_external_transmission,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if summary["observed_status"] == "complete" else 2

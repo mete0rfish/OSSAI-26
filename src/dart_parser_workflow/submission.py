@@ -9,16 +9,20 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .config import SubmissionSettings
+from .config import ProviderSettings, SubmissionSettings
 from .dataset import dataset_sha256
 from .dataset_review import validate_approved_reviews
 from .execution import CallLedger
 from .fixed_prompt_benchmark import aggregate_fixed_prompt_results
 from .html_utils import sha256_file
-from .prompt_optimization import run_case_v3
+from .prompt_optimization import iter_cases_v3
 from .prompts import load_prompt
 from .providers import ModelProvider, create_target_provider_v3, list_ollama_models
 from .schemas import EvaluationCaseV3, GenerationRequest, ModelUsage
+
+
+class _SubmissionInconclusive(RuntimeError):
+    """Stop before Test while preserving a complete inconclusive validation run."""
 
 
 def _sha256_text(value: str) -> str:
@@ -102,6 +106,32 @@ def select_submission_combination(
     """Validation 결과만으로 candidate gate와 최종 조합 순위를 계산한다."""
 
     model_ids = list(dict.fromkeys(model for model, _ in validation_results))
+    for model_id in model_ids:
+        baseline_rows = validation_results[(model_id, "baseline")]
+        candidate_rows = validation_results[(model_id, "candidate")]
+        baseline_identity = [
+            (item.sample_id, item.html_sha256) for item in baseline_rows
+        ]
+        candidate_identity = [
+            (item.sample_id, item.html_sha256) for item in candidate_rows
+        ]
+        has_error = any(
+            item.status in {"input_error", "generation_error"}
+            for item in [*baseline_rows, *candidate_rows]
+        )
+        if has_error or baseline_identity != candidate_identity:
+            return {
+                "status": "inconclusive",
+                "reason": (
+                    "validation_technical_error"
+                    if has_error
+                    else "validation_pair_mismatch"
+                ),
+                "selected_model": None,
+                "selected_prompt": None,
+                "model_comparisons": [],
+                "test_used_for_selection": False,
+            }
     comparisons: list[dict] = []
     eligible: list[dict] = []
     for model_id in model_ids:
@@ -150,6 +180,7 @@ def select_submission_combination(
 
     selected = max(eligible, key=ranking)
     return {
+        "status": "selected",
         "selected_model": selected["model"],
         "selected_prompt": selected["prompt"],
         "selected_metrics": selected["metrics"],
@@ -177,22 +208,25 @@ def _run_cases(
     prompt_variant: str,
     settings: SubmissionSettings,
     provider: ModelProvider,
+    provider_settings: ProviderSettings,
     model_id: str,
     ledger: CallLedger,
     redact_expected: bool = False,
 ) -> list:
+    iterator = iter_cases_v3(
+        cases,
+        run_id=run_id,
+        prompt_template=prompt,
+        prompt_variant=prompt_variant,
+        workflow=settings.workflow,
+        provider=provider,
+        provider_settings=provider_settings,
+        requested_model=model_id,
+        ledger=ledger,
+        retry=settings.retry,
+    )
     results = []
-    for case in cases:
-        result = run_case_v3(
-            case,
-            run_id=run_id,
-            prompt_template=prompt,
-            prompt_variant=prompt_variant,
-            max_html_bytes=settings.workflow.max_html_bytes,
-            provider=provider,
-            requested_model=model_id,
-            ledger=ledger,
-        )
+    for result in iterator:
         results.append(result)
         artifact = result.model_dump(mode="json")
         if redact_expected:
@@ -311,6 +345,7 @@ def run_submission_workflow(
     providers: dict[str, ModelProvider] | None = None,
     available_model_ids: list[str] | None = None,
     reviews_path: str | Path | None = None,
+    authorize_external_transmission: bool = False,
 ) -> dict:
     root = Path(project_root).resolve()
     baseline_path, baseline = _resolve_prompt(
@@ -326,6 +361,8 @@ def run_submission_workflow(
     if any(not rows for rows in splits.values()):
         raise ValueError("development/validation/test split은 모두 비어 있지 않아야 합니다")
     review_summary = None
+    if settings.models[0].kind == "ollama" and not authorize_external_transmission:
+        raise PermissionError("live submission에는 명시적 외부 전송 승인이 필요합니다")
     if settings.models[0].kind == "ollama":
         if reviews_path is None:
             raise ValueError("live submission에는 승인 완료된 --reviews JSONL이 필요합니다")
@@ -367,6 +404,7 @@ def run_submission_workflow(
         "candidate_prompt_path": str(candidate_path.relative_to(root)),
         "candidate_prompt_sha256": _sha256_text(candidate),
         "scorer_sha256": sha256_file(Path(__file__).with_name("evaluation.py")),
+        "input_preparation": settings.workflow.model_dump(mode="json"),
         "human_review": review_summary,
         "selection": None,
         "test_metrics": None,
@@ -434,6 +472,7 @@ def run_submission_workflow(
                     prompt_variant=prompt_variant,
                     settings=settings,
                     provider=provider,
+                    provider_settings=model_settings[model_id],
                     model_id=model_id,
                     ledger=ledger,
                 )
@@ -443,6 +482,18 @@ def run_submission_workflow(
             min_mean_improvement=settings.selection.min_mean_improvement,
             candidate_identical=baseline == candidate,
         )
+        if selection["status"] == "inconclusive":
+            _atomic_json(output / "selection.json", selection)
+            summary.update(
+                observed_status="complete",
+                quality_status="inconclusive",
+                finished_at=datetime.now(UTC).isoformat(),
+                selection=selection,
+                provider_usage={
+                    "target": ledger.role_summary("target", "multiple-fixed-models")
+                },
+            )
+            raise _SubmissionInconclusive
         improved_examples = []
         for model_id in model_settings:
             baseline_by_id = {
@@ -480,6 +531,7 @@ def run_submission_workflow(
             prompt_variant="selected",
             settings=settings,
             provider=active_providers[selected_model],
+            provider_settings=model_settings[selected_model],
             model_id=selected_model,
             ledger=ledger,
             redact_expected=True,
@@ -501,6 +553,8 @@ def run_submission_workflow(
                 "target": ledger.role_summary("target", "multiple-fixed-models")
             },
         )
+    except _SubmissionInconclusive:
+        pass
     except Exception as exc:
         summary.update(
             observed_status=("not_run" if summary["selection"] is None else "partial"),

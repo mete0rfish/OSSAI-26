@@ -28,6 +28,16 @@ class CapturingOptimizer:
         return self.delegate.propose(request)
 
 
+class ValidationFailureProvider:
+    def __init__(self, delegate: RoleRecordedProvider) -> None:
+        self.delegate = delegate
+
+    def generate(self, request):
+        if request.sample_id == "val-answer" and request.prompt_variant == "baseline":
+            raise TimeoutError("transient validation failure")
+        return self.delegate.generate(request)
+
+
 def _inputs():
     settings = load_optimization_settings(ROOT / "configs/prompt-optimization.recorded.yaml")
     cases = load_cases_v3(
@@ -86,6 +96,7 @@ def test_recorded_v3_optimization_keeps_test_out_of_selection(tmp_path: Path) ->
     assert "dev-answer" in optimizer_prompt
     assert "val-answer" not in optimizer_prompt
     assert "test-answer" not in optimizer_prompt
+    assert "요약·교정·보완·번역·재작성하지 않고 수정 없이 그대로" in optimizer_prompt
     calls = [
         json.loads(line)
         for line in (tmp_path / "run/calls.jsonl").read_text(encoding="utf-8").splitlines()
@@ -93,6 +104,11 @@ def test_recorded_v3_optimization_keeps_test_out_of_selection(tmp_path: Path) ->
     first_test = next(index for index, row in enumerate(calls) if row["sample_id"] == "test-answer")
     assert all(row["sample_id"] not in {"test-answer", "test-none"} for row in calls[:first_test])
     assert summary["test_used_for_generation_or_selection"] is False
+    test_rows = [
+        json.loads(line)
+        for line in (tmp_path / "run/test.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert all("expected" not in row for row in test_rows)
 
 
 def test_budget_exhaustion_preserves_partial_run(tmp_path: Path) -> None:
@@ -116,6 +132,25 @@ def test_budget_exhaustion_preserves_partial_run(tmp_path: Path) -> None:
     assert "상한" in summary["error"]
 
 
+def test_validation_technical_error_is_inconclusive_and_skips_test(tmp_path: Path) -> None:
+    settings, cases, fixture = _inputs()
+    delegate = RoleRecordedProvider(fixture, "recorded-target-v3")
+
+    summary = run_prompt_optimization(
+        cases,
+        settings,
+        tmp_path / "inconclusive",
+        ROOT,
+        target_provider=ValidationFailureProvider(delegate),
+        optimizer_provider=RoleRecordedProvider(fixture, "recorded-optimizer-v3"),
+    )
+
+    assert summary["observed_status"] == "complete"
+    assert summary["quality_status"] == "inconclusive"
+    assert summary["selection"]["selected"] == "none"
+    assert not (tmp_path / "inconclusive/test.jsonl").exists()
+
+
 def _result(
     mean: float,
     *,
@@ -134,7 +169,7 @@ def _result(
 @pytest.mark.parametrize(
     ("candidate", "expected_reason"),
     [
-        (_result(1, status="generation_error"), "validation_errors_increased"),
+        (_result(1, status="generation_error"), "validation_inconclusive"),
         (_result(1, abstained=True), "answerable_abstentions_increased"),
         (_result(1, strict=False), "strict_pass_rate_decreased"),
         (_result(0.505), "validation_not_improved"),
@@ -151,9 +186,11 @@ def test_selector_applies_rollback_gates_in_order(candidate, expected_reason) ->
     )
 
     assert selection.reason == expected_reason
-    assert selection.selected == (
-        "candidate" if expected_reason == "validation_improved" else "baseline"
-    )
+    expected_selected = {
+        "validation_improved": "candidate",
+        "validation_inconclusive": "none",
+    }.get(expected_reason, "baseline")
+    assert selection.selected == expected_selected
 
 
 def test_missing_live_provider_key_is_not_run(monkeypatch, tmp_path: Path) -> None:
@@ -168,7 +205,32 @@ def test_missing_live_provider_key_is_not_run(monkeypatch, tmp_path: Path) -> No
         update={"target_provider": live, "optimizer_provider": live}
     )
 
-    summary = run_prompt_optimization(cases, settings, tmp_path / "not-run", ROOT)
+    summary = run_prompt_optimization(
+        cases,
+        settings,
+        tmp_path / "not-run",
+        ROOT,
+        authorize_external_transmission=True,
+    )
 
     assert summary["observed_status"] == "not_run"
     assert summary["quality_status"] == "inconclusive"
+
+
+def test_live_optimization_requires_external_transmission_authorization(
+    tmp_path: Path,
+) -> None:
+    settings, cases, _ = _inputs()
+    live = ProviderSettings(
+        kind="gemini",
+        model="test-model",
+        api_key_env="OSSAI_TEST_KEY",
+    )
+    settings = settings.model_copy(
+        update={"target_provider": live, "optimizer_provider": live}
+    )
+
+    with pytest.raises(PermissionError, match="외부 전송 승인"):
+        run_prompt_optimization(cases, settings, tmp_path / "unauthorized", ROOT)
+
+    assert not (tmp_path / "unauthorized").exists()

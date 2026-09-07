@@ -9,7 +9,11 @@ from dart_parser_workflow.providers import (
     OllamaProvider,
     list_ollama_models,
 )
-from dart_parser_workflow.schemas import GenerationRequest, OptimizationRequest
+from dart_parser_workflow.schemas import (
+    BatchGenerationRequest,
+    GenerationRequest,
+    OptimizationRequest,
+)
 
 
 class FakeResponse:
@@ -73,6 +77,49 @@ def test_ollama_target_uses_native_structured_chat(monkeypatch) -> None:
     assert response.actual_model == "qwen-local:latest"
     assert response.usage.input_tokens == 101
     assert response.usage.output_tokens == 22
+
+
+def test_ollama_target_supports_batched_answers(monkeypatch) -> None:
+    captured = {}
+    answers = {
+        "answers": [
+            {
+                "sample_id": sample_id,
+                "answer": "100원",
+                "evidence": [{"quote": "매출액 100원"}],
+                "confidence": 0.9,
+                "abstained": False,
+                "abstention_reason": None,
+            }
+            for sample_id in ("case-1", "case-2")
+        ]
+    }
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data)
+        return FakeResponse(
+            {
+                "model": "qwen-local:latest",
+                "message": {"role": "assistant", "content": json.dumps(answers)},
+                "prompt_eval_count": 101,
+                "eval_count": 22,
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    provider = OllamaProvider(
+        ProviderSettings(kind="ollama", model="qwen-local")
+    )
+
+    result = provider.generate_batch(
+        BatchGenerationRequest(
+            sample_ids=["case-1", "case-2"],
+            prompt="질문 두 개와 HTML",
+        )
+    )
+
+    assert captured["payload"]["format"]["type"] == "object"
+    assert [answer.sample_id for answer in result.result.answers] == ["case-1", "case-2"]
 
 
 def test_ollama_optimizer_validates_prompt_candidate(monkeypatch) -> None:

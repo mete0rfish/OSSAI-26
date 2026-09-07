@@ -1,8 +1,8 @@
 artifact_schema_version: 3
 baseline_prompt: prompts/dart-qa-baseline.md
 baseline_prompt_sha256: e12d207eb35657ea785bd955bbbaa9f2ec5bd41653804c54fd774c7232f49798
-candidate_prompt: prompts/dart-qa-v2.md
-candidate_prompt_sha256: 896cb5a6b4679b0b0b71c634b22b15d62612bed722455616a9ed6bfba7dc5306
+candidate_prompt: prompts/dart-qa-v3.md
+candidate_prompt_sha256: ce2bb24d5ef847b535c8c2f1fc83953d441ad44cd249da0ec5704fce558fe7ec
 
 models:
   - kind: ollama

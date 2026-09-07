@@ -7,13 +7,59 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from .config import ExecutionLimits
+from .config import ExecutionLimits, RetrySettings
 from .schemas import ModelUsage
 
 
 class BudgetExceeded(RuntimeError):
     pass
+
+
+TechnicalErrorCode = Literal[
+    "timeout",
+    "rate_limit",
+    "transport",
+    "server_error",
+    "empty_response",
+    "response_schema",
+    "provider_error",
+]
+
+
+@dataclass(frozen=True)
+class ErrorClassification:
+    code: TechnicalErrorCode
+    retryable: bool
+    exception_type: str
+
+    def summary(self) -> str:
+        return f"{self.code}: {self.exception_type}"
+
+
+def classify_provider_error(
+    exc: Exception, retry: RetrySettings
+) -> ErrorClassification:
+    """Provider 예외를 원문 응답을 노출하지 않는 기술 오류로 분류한다."""
+
+    exception_type = type(exc).__name__
+    message = str(exc).lower()
+    if isinstance(exc, TimeoutError) or "timed out" in message or "timeout" in message:
+        return ErrorClassification("timeout", True, exception_type)
+    if "http 429" in message or "rate limit" in message:
+        return ErrorClassification("rate_limit", True, exception_type)
+    if any(f"http {status}" in message for status in range(500, 600)):
+        return ErrorClassification("server_error", True, exception_type)
+    if "연결 실패" in message or "connection" in message:
+        return ErrorClassification("transport", True, exception_type)
+    if "empty" in message or "비어" in message:
+        return ErrorClassification("empty_response", True, exception_type)
+    if isinstance(exc, (ValueError, TypeError)):
+        return ErrorClassification(
+            "response_schema", retry.retry_schema_errors, exception_type
+        )
+    return ErrorClassification("provider_error", False, exception_type)
 
 
 @dataclass
@@ -67,6 +113,12 @@ class CallLedger:
         usage: ModelUsage,
         latency_seconds: float | None,
         html_sha256: str | None = None,
+        html_preprocessor: str | None = None,
+        prepared_html_sha256: str | None = None,
+        raw_html_bytes: int | None = None,
+        prepared_html_bytes: int | None = None,
+        estimated_input_tokens: int | None = None,
+        batch_size: int = 1,
         attempt: int = 0,
         error: str | None = None,
     ) -> None:
@@ -92,6 +144,12 @@ class CallLedger:
             "prompt_variant": prompt_variant,
             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
             "html_sha256": html_sha256,
+            "html_preprocessor": html_preprocessor,
+            "prepared_html_sha256": prepared_html_sha256,
+            "raw_html_bytes": raw_html_bytes,
+            "prepared_html_bytes": prepared_html_bytes,
+            "estimated_input_tokens": estimated_input_tokens,
+            "batch_size": batch_size,
             "attempt": attempt,
             "requested_model": requested_model,
             "actual_model": actual_model,
@@ -105,6 +163,7 @@ class CallLedger:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
+
     def assert_within_limits(self, role: str) -> None:
         self._check_consumed(role)
 

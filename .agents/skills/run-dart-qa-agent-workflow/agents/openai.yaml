@@ -1,0 +1,4 @@
+interface:
+  display_name: "DART QA Agent 워크플로"
+  short_description: "승인형 DART QA 개선·검증 단계를 안전하게 실행"
+  default_prompt: "Use $run-dart-qa-agent-workflow to inspect and run the next permitted DART QA workflow stage."

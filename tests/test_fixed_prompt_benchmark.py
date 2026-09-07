@@ -125,6 +125,11 @@ def test_fixed_prompt_benchmark_scores_all_cases_without_optimizer(tmp_path: Pat
     assert "prompt" not in calls[0]
     assert "expected" not in calls[0]
     assert "html" not in calls[0]
+    result_rows = [
+        json.loads(line)
+        for line in (tmp_path / "run/results.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert all("expected" not in row for row in result_rows if row["split"] == "test")
 
 
 def test_fixed_prompt_hash_mismatch_fails_before_creating_output(tmp_path: Path) -> None:

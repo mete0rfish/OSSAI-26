@@ -17,6 +17,10 @@ from pydantic import BaseModel
 
 from .config import ProviderSettings
 from .schemas import (
+    BatchDisclosureAnswer,
+    BatchDisclosureAnswers,
+    BatchGenerationRequest,
+    BatchProviderResponse,
     DisclosureAnswer,
     GenerationRequest,
     ModelUsage,
@@ -29,6 +33,10 @@ from .schemas import (
 
 class ModelProvider(Protocol):
     def generate(self, request: GenerationRequest) -> ProviderResponse: ...
+
+
+class BatchModelProvider(ModelProvider, Protocol):
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse: ...
 
 
 class OptimizerProvider(Protocol):
@@ -96,6 +104,33 @@ class GeminiProvider:
             requested_model=self.settings.model,
             actual_model=getattr(response, "model_version", None) or self.settings.model,
             usage=usage,
+            latency_seconds=latency,
+        )
+
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse:
+        started = time.monotonic()
+        response = self.client.models.generate_content(
+            model=self.settings.model,
+            contents=request.prompt,
+            config=_gemini_generation_config(self.settings, BatchDisclosureAnswers),
+        )
+        latency = time.monotonic() - started
+        parsed = response.parsed
+        if isinstance(parsed, BatchDisclosureAnswers):
+            result = parsed
+        elif parsed is not None:
+            result = BatchDisclosureAnswers.model_validate(parsed)
+        else:
+            result = BatchDisclosureAnswers.model_validate_json(response.text)
+        metadata = getattr(response, "usage_metadata", None)
+        return BatchProviderResponse(
+            result=result,
+            requested_model=self.settings.model,
+            actual_model=getattr(response, "model_version", None) or self.settings.model,
+            usage=ModelUsage(
+                input_tokens=getattr(metadata, "prompt_token_count", None),
+                output_tokens=getattr(metadata, "candidates_token_count", None),
+            ),
             latency_seconds=latency,
         )
 
@@ -269,6 +304,25 @@ class OllamaProvider:
             latency_seconds=latency,
         )
 
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse:
+        parsed, response, latency = _ollama_chat(
+            self.settings,
+            request.prompt,
+            BatchDisclosureAnswers,
+            self.api_key,
+        )
+        assert isinstance(parsed, BatchDisclosureAnswers)
+        return BatchProviderResponse(
+            result=parsed,
+            requested_model=self.settings.model,
+            actual_model=str(response.get("model") or self.settings.model),
+            usage=ModelUsage(
+                input_tokens=response.get("prompt_eval_count"),
+                output_tokens=response.get("eval_count"),
+            ),
+            latency_seconds=latency,
+        )
+
 
 class OllamaOptimizerProvider:
     def __init__(self, settings: ProviderSettings) -> None:
@@ -392,6 +446,26 @@ class NvidiaNimProvider:
             latency_seconds=latency,
         )
 
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse:
+        parsed, response, latency = _nvidia_nim_chat(
+            self.settings,
+            request.prompt,
+            BatchDisclosureAnswers,
+            self.api_key,
+        )
+        assert isinstance(parsed, BatchDisclosureAnswers)
+        usage = response.get("usage") or {}
+        return BatchProviderResponse(
+            result=parsed,
+            requested_model=self.settings.model,
+            actual_model=str(response.get("model") or self.settings.model),
+            usage=ModelUsage(
+                input_tokens=usage.get("prompt_tokens"),
+                output_tokens=usage.get("completion_tokens"),
+            ),
+            latency_seconds=latency,
+        )
+
 
 class NvidiaNimOptimizerProvider:
     def __init__(self, settings: ProviderSettings) -> None:
@@ -490,6 +564,44 @@ class RoleRecordedProvider:
             requested_model=self.model,
             actual_model=str(row.get("actual_model", self.model)),
             usage=self._usage(row),
+            latency_seconds=time.monotonic() - started,
+        )
+
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse:
+        started = time.monotonic()
+        rows = [
+            self._row(
+                request.provider_role,
+                sample_id,
+                request.prompt_variant,
+                request.attempt,
+            )
+            for sample_id in request.sample_ids
+        ]
+        usages = [self._usage(row) for row in rows]
+
+        def total(name: str) -> int | None:
+            values = [getattr(usage, name) for usage in usages]
+            if all(value is None for value in values):
+                return None
+            return sum(value or 0 for value in values)
+
+        return BatchProviderResponse(
+            result=BatchDisclosureAnswers(
+                answers=[
+                    BatchDisclosureAnswer(
+                        sample_id=sample_id,
+                        **DisclosureAnswer.model_validate(row["response"]).model_dump(),
+                    )
+                    for sample_id, row in zip(request.sample_ids, rows, strict=True)
+                ]
+            ),
+            requested_model=self.model,
+            actual_model=self.model,
+            usage=ModelUsage(
+                input_tokens=total("input_tokens"),
+                output_tokens=total("output_tokens"),
+            ),
             latency_seconds=time.monotonic() - started,
         )
 

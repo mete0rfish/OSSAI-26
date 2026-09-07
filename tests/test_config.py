@@ -50,7 +50,21 @@ def test_submission_config_pins_three_ollama_pro_models() -> None:
         "glm-5.3-flash",
     ]
     assert all(provider.base_url == "https://ollama.com" for provider in settings.models)
+    assert all(provider.context_window_tokens == 1_048_576 for provider in settings.models)
+    assert settings.target_limits.max_requests == 31
+    assert settings.workflow.html_preprocessing == "compact"
+    assert settings.workflow.batch_questions_by_html is True
     assert settings.dataset.unique_metric_count == 9
+
+
+def test_provider_output_reservation_must_fit_context() -> None:
+    with pytest.raises(ValueError, match="context_window_tokens"):
+        ProviderSettings(
+            kind="ollama",
+            model="too-small",
+            max_output_tokens=100,
+            context_window_tokens=100,
+        )
 
 
 def test_live_submission_rejects_non_ollama_provider() -> None:

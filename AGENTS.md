@@ -28,6 +28,8 @@
 ## Evaluation invariants
 
 - Never include expected answers in target-provider prompts.
+- Pass each user-provided question to the target provider verbatim. Do not trim, summarize,
+  correct, translate, supplement, or rewrite it.
 - Only development failures may be sent to the optimizer. Only validation results may select a prompt. Test cases run only after selection.
 - Preserve automatic rollback when a candidate is identical, increases errors or answerable abstentions, reduces strict pass rate, or misses the configured mean-improvement threshold.
 - Treat answerable and unanswerable cases separately. An unanswerable case passes only with the exact safe-abstention contract.

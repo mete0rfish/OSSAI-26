@@ -35,6 +35,7 @@ class ProviderSettings(SettingsModel):
     top_p: float | None = Field(default=None, gt=0, le=1)
     enable_thinking: bool | None = None
     max_output_tokens: int = Field(default=8192, gt=0)
+    context_window_tokens: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="before")
     @classmethod
@@ -64,11 +65,19 @@ class ProviderSettings(SettingsModel):
             raise ValueError("Ollama Cloud에는 api_key_env가 필요합니다")
         if self.kind == "recorded" and not self.recorded_responses:
             raise ValueError("recorded provider에는 recorded_responses가 필요합니다")
+        if (
+            self.context_window_tokens is not None
+            and self.max_output_tokens >= self.context_window_tokens
+        ):
+            raise ValueError("max_output_tokens는 context_window_tokens보다 작아야 합니다")
         return self
 
 
 class WorkflowSettings(SettingsModel):
     max_html_bytes: int = Field(default=5_000_000, gt=0)
+    html_preprocessing: Literal["raw", "compact"] = "compact"
+    batch_questions_by_html: bool = True
+    estimated_bytes_per_token: float = Field(default=2.0, gt=0)
 
 
 class AppSettings(SettingsModel):
@@ -97,6 +106,16 @@ class ExecutionLimits(SettingsModel):
         if self.max_cost_usd is not None and self.pricing is None:
             raise ValueError("max_cost_usd를 사용하려면 pricing이 필요합니다")
         return self
+
+
+class RetrySettings(SettingsModel):
+    max_attempts_per_call: int = Field(default=1, ge=1, le=10)
+    initial_backoff_seconds: float = Field(default=0, ge=0, le=60)
+    retry_schema_errors: bool = False
+
+
+class AgentWorkflowSettings(SettingsModel):
+    max_iterations: int = Field(default=3, ge=1, le=20)
 
 
 class SelectionSettings(SettingsModel):
@@ -157,6 +176,8 @@ class OptimizationSettings(SettingsModel):
     optimizer_provider: ProviderSettings
     target_limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
     optimizer_limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
+    retry: RetrySettings = Field(default_factory=RetrySettings)
+    agent_workflow: AgentWorkflowSettings = Field(default_factory=AgentWorkflowSettings)
     selection: SelectionSettings = Field(default_factory=SelectionSettings)
     dataset: DatasetRequirements = Field(default_factory=DatasetRequirements)
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
@@ -170,6 +191,7 @@ class FixedPromptBenchmarkSettings(SettingsModel):
     prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     target_provider: ProviderSettings
     target_limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
+    retry: RetrySettings = Field(default_factory=RetrySettings)
     dataset: DatasetRequirements = Field(default_factory=DatasetRequirements)
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
 
@@ -184,6 +206,7 @@ class SubmissionSettings(SettingsModel):
     candidate_prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     models: list[ProviderSettings] = Field(min_length=3, max_length=3)
     target_limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
+    retry: RetrySettings = Field(default_factory=RetrySettings)
     selection: SelectionSettings = Field(default_factory=SelectionSettings)
     dataset: DatasetRequirements = Field(default_factory=DatasetRequirements)
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)

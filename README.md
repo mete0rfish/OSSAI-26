@@ -41,6 +41,7 @@ flowchart LR
 | 설계 원칙 | 보장 내용 |
 | --- | --- |
 | 정답 비공개 | target 모델에는 질문과 HTML만 전달한다. |
+| 질문 원문 보존 | 사용자가 제공한 질문은 공백·문장부호를 포함해 수정 없이 전달한다. |
 | split 격리 | Development만 후보 생성, Validation만 선택, Test는 선택 후 평가에 사용한다. |
 | family 격리 | 같은 공시·질문의 파생 사례가 서로 다른 split에 섞이지 않게 한다. |
 | 자동 rollback | 동일 후보, 오류·보류 증가, strict pass 저하, 최소 개선 폭 미달 시 baseline을 유지한다. |
@@ -115,6 +116,34 @@ reports/prompt-optimization/<run-id>/
 상세 실행 과정과 recorded 예제의 예상 결과는
 [실행·채점 워크플로](docs/workflow.md)를 참고한다.
 
+### 승인형 Agent 워크플로
+
+사람 승인 경계를 실제 실행 단계로 분리하려면 `run_agent_workflow.py`를 사용한다. 각 명령은 새
+stage run만 만들며 기존 보고서를 덮어쓰지 않는다.
+
+```bash
+uv run --locked python scripts/run_agent_workflow.py prepare \
+  --cases configs/cases.v3.example.jsonl \
+  --config configs/prompt-optimization.recorded.yaml \
+  --workflow reports/agent-workflow/<workflow-id>
+
+uv run --locked python scripts/run_agent_workflow.py develop \
+  --cases configs/cases.v3.example.jsonl \
+  --config configs/prompt-optimization.recorded.yaml \
+  --workflow reports/agent-workflow/<workflow-id> \
+  --stage-run-id development-1
+```
+
+Development 게이트 통과 후 사람이 `approve-validation`, Validation 선택 후
+`approve-test`를 실행한다. 승인자 이름은 `--approved-by`로 기록한다. Live 단계의 승인은
+`--authorize-external-transmission`을 함께 지정해야 한다. 전체 명령과 상태 계약은
+[실행·채점 워크플로](docs/workflow.md)의 승인형 Agent 절을 참고한다.
+
+Codex와 Claude Code는 같은 Python controller를 호출하는 저장소 Skill을 제공한다.
+
+- Codex: [run-dart-qa-agent-workflow](.agents/skills/run-dart-qa-agent-workflow/SKILL.md)
+- Claude Code: [run-dart-qa-agent-workflow](.claude/skills/run-dart-qa-agent-workflow/SKILL.md)
+
 ### 제출 워크플로 한 명령 재현
 
 세 모델 × baseline/v2 Validation 비교, 자동 선택, 선택 이후 Test 1회와 보고서 생성을 한 명령으로
@@ -147,6 +176,12 @@ Pydantic schema로 검증한다. 코드 블록 밖 설명이나 schema 불일치
 제외한 `test.jsonl`, `comparison.md`, `summary.json`과 최소 호출 로그를 포함한다. 기존 출력
 디렉터리는 재사용할 수 없다.
 
+v3 target 호출은 기본적으로 원본과 화면 텍스트·표 구조가 같은 compact HTML을 사용한다. 같은
+split에서 같은 HTML을 공유하는 질문은 한 batch로 묶고, 응답은 case별로 분리해 기존 Python
+채점기를 적용한다. 제출용 36건은 사전 점검 3회, Validation 24 batch, Test 4 batch의 최대 31회
+호출을 사용한다. 설정된 모델 context를 넘을 것으로 추정되는 입력은 외부 호출 전에
+`input_error`로 차단한다.
+
 공식 실행 후 프롬프트를 다시 개선할 때에는 공개된 Validation/Test 결과를 사용하지 않는다.
 `configs/development-baseline.ollama-pro.yaml`과 `configs/development-v3.ollama-pro.yaml`로 승인된
 Development 12건만 먼저 비교하며, v3가 Development 안전 조건을 통과하기 전에는 공식
@@ -157,6 +192,7 @@ submission 후보로 승격하지 않는다.
 | 목적 | CLI | 설명 |
 | --- | --- | --- |
 | 데이터 사전 검증 | `scripts/validate_dataset.py` | ID, split, family, 경로, HTML hash, 기대 답·근거를 모델 호출 전에 검사 |
+| 승인형 Agent 실행 | `scripts/run_agent_workflow.py` | 불변 stage run, 승인 봉인, Test 단발 실행 |
 | 프롬프트 최적화 | `scripts/optimize_dart_qa_prompt.py` | Development → Validation 선택/rollback → Test 실행 |
 | 정답 없는 사전 탐색 | `scripts/probe_dart_qa_model.py` | 기대 답 없이 모델 답·근거와 grounding만 기록 |
 | 고정 프롬프트 비교 | `scripts/benchmark_fixed_prompt.py` | 같은 데이터·프롬프트·채점기로 여러 target 모델 비교 |
@@ -167,7 +203,8 @@ submission 후보로 승격하지 않는다.
 
 지원 provider는 `recorded`, Gemini, NVIDIA NIM, 로컬/Cloud Ollama다. Target과 optimizer를
 서로 다른 provider로 조합할 수 있다. Live 실행 전에는 `.env.example`을 복사하고 필요한 API 키를
-환경변수로 설정한다.
+환경변수로 설정한다. Live 최적화·제출·robustness에는
+`--authorize-external-transmission`도 필요하다.
 
 ```bash
 cp .env.example .env
@@ -210,6 +247,8 @@ scripts/                    얇은 CLI 진입점
 configs/                    v2/v3 사례와 provider 설정 예제
 prompts/                    실행 프롬프트의 단일 원본
 tests/                      offline 단위 테스트와 recorded E2E fixture
+.agents/skills/             Codex 저장소 Skill
+.claude/skills/             Claude Code 저장소 Skill
 local-data/                 실제 HTML·평가 데이터, Git 제외
 reports/                    실행 결과, Git 제외
 ```

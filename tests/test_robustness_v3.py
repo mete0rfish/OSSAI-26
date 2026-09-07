@@ -182,6 +182,13 @@ def test_recorded_robustness_e2e_and_lineage_check(tmp_path: Path) -> None:
     assert result["quality_status"] == "pass"
     assert result["record_count"] == result["target_count"] == 3
     assert result["counts"] == {"passed": 3}
+    response_rows = [
+        json.loads(line)
+        for line in (tmp_path / "robustness/responses.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert all("expected" not in row["result"] for row in response_rows)
 
     summary["dataset_sha256"] = "0" * 64
     (optimization / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
