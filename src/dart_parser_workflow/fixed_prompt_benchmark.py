@@ -15,7 +15,7 @@ from .config import FixedPromptBenchmarkSettings
 from .dataset import dataset_sha256
 from .execution import CallLedger
 from .html_utils import sha256_file
-from .prompt_optimization import run_case_v3
+from .prompt_optimization import iter_cases_v3
 from .prompts import load_prompt
 from .providers import ModelProvider, create_target_provider_v3
 from .schemas import CaseResultV3, EvaluationCaseV3
@@ -192,6 +192,7 @@ def run_fixed_prompt_benchmark(
         "prompt_sha256": prompt_hash,
         "scorer_sha256": sha256_file(Path(__file__).with_name("evaluation.py")),
         "target_provider": settings.target_provider.model_dump(mode="json"),
+        "input_preparation": settings.workflow.model_dump(mode="json"),
         "expected_answers_sent_to_provider": False,
         "optimizer_used": False,
         "candidate_generated": False,
@@ -221,19 +222,24 @@ def run_fixed_prompt_benchmark(
 
     results: list[CaseResultV3] = []
     try:
-        for case in selected:
-            result = run_case_v3(
-                case,
-                run_id=run_id,
-                prompt_template=prompt,
-                prompt_variant="fixed",
-                max_html_bytes=settings.workflow.max_html_bytes,
-                provider=provider,
-                requested_model=settings.target_provider.model,
-                ledger=ledger,
-            )
+        iterator = iter_cases_v3(
+            selected,
+            run_id=run_id,
+            prompt_template=prompt,
+            prompt_variant="fixed",
+            workflow=settings.workflow,
+            provider=provider,
+            provider_settings=settings.target_provider,
+            requested_model=settings.target_provider.model,
+            ledger=ledger,
+            retry=settings.retry,
+        )
+        for result in iterator:
             results.append(result)
-            _append_jsonl(output / "results.jsonl", result.model_dump(mode="json"))
+            artifact = result.model_dump(mode="json")
+            if result.split == "test":
+                artifact.pop("expected")
+            _append_jsonl(output / "results.jsonl", artifact)
         ledger.assert_within_limits("target")
         metrics = aggregate_fixed_prompt_results(results)
         metrics_by_split = {

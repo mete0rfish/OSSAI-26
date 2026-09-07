@@ -35,6 +35,11 @@ def main(argv: list[str] | None = None) -> int:
         help="target API 키가 든 환경변수 이름; 키 값 자체를 전달하지 마세요",
     )
     parser.add_argument("--target-base-url", help="target provider API base URL")
+    parser.add_argument(
+        "--authorize-external-transmission",
+        action="store_true",
+        help="DART HTML과 질문의 외부 전송을 이번 robustness 실행에 승인",
+    )
     args = parser.parse_args(argv)
     root = Path(args.project_root).resolve()
     load_dotenv(root / ".env", override=False)
@@ -60,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         args.reviews,
         args.output,
         root,
+        authorize_external_transmission=args.authorize_external_transmission,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if summary["observed_status"] == "complete" else 2

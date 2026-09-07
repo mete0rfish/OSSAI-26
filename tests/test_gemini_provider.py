@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from dart_parser_workflow.config import ProviderSettings
 from dart_parser_workflow.providers import GeminiOptimizerProvider, GeminiProvider
 from dart_parser_workflow.schemas import (
+    BatchDisclosureAnswers,
+    BatchGenerationRequest,
     DisclosureAnswer,
     GenerationRequest,
     OptimizationRequest,
@@ -80,6 +82,58 @@ def test_gemini_target_uses_json_schema_field(monkeypatch) -> None:
     assert result.actual_model == "gemini-actual"
     assert result.usage.input_tokens == 101
     assert result.usage.output_tokens == 22
+
+
+def test_gemini_target_supports_batched_answers(monkeypatch) -> None:
+    captured = {}
+    answers = {
+        "answers": [
+            {
+                "sample_id": sample_id,
+                "answer": "100원",
+                "evidence": [{"quote": "시설자금 100원"}],
+                "confidence": 0.9,
+                "abstained": False,
+                "abstention_reason": None,
+            }
+            for sample_id in ("case-1", "case-2")
+        ]
+    }
+    response = SimpleNamespace(
+        parsed=answers,
+        text=json.dumps(answers),
+        model_version="gemini-actual",
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=101,
+            candidates_token_count=22,
+        ),
+    )
+    monkeypatch.setenv("GEMINI_API_KEY", "secret-for-test")
+    monkeypatch.setattr(
+        "dart_parser_workflow.providers.genai.Client",
+        lambda *, api_key: FakeClient(
+            api_key=api_key,
+            response=response,
+            captured=captured,
+        ),
+    )
+    provider = GeminiProvider(
+        ProviderSettings(
+            kind="gemini",
+            model="gemini-requested",
+            api_key_env="GEMINI_API_KEY",
+        )
+    )
+
+    result = provider.generate_batch(
+        BatchGenerationRequest(
+            sample_ids=["case-1", "case-2"],
+            prompt="질문 두 개와 HTML",
+        )
+    )
+
+    assert captured["config"].response_json_schema == BatchDisclosureAnswers.model_json_schema()
+    assert [answer.sample_id for answer in result.result.answers] == ["case-1", "case-2"]
 
 
 def test_gemini_optimizer_uses_json_schema_field(monkeypatch) -> None:

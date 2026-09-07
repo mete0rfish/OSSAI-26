@@ -10,6 +10,7 @@ target_provider:
   request_timeout_seconds: 300
   temperature: 0.0
   max_output_tokens: 8192
+  context_window_tokens: 1048576
 
 target_limits:
   max_requests: 40

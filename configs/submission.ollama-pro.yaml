@@ -1,0 +1,91 @@
+artifact_schema_version: 3
+baseline_prompt: prompts/dart-qa-baseline.md
+baseline_prompt_sha256: e12d207eb35657ea785bd955bbbaa9f2ec5bd41653804c54fd774c7232f49798
+candidate_prompt: prompts/dart-qa-v2.md
+candidate_prompt_sha256: 896cb5a6b4679b0b0b71c634b22b15d62612bed722455616a9ed6bfba7dc5306
+
+models:
+  - kind: ollama
+    model: deepseek-v4-flash:0731
+    api_key_env: OLLAMA_API_KEY
+    base_url: https://ollama.com
+    request_timeout_seconds: 600
+    temperature: 0.0
+    max_output_tokens: 8192
+    context_window_tokens: 1048576
+  - kind: ollama
+    model: gemma4:31b
+    api_key_env: OLLAMA_API_KEY
+    base_url: https://ollama.com
+    request_timeout_seconds: 600
+    temperature: 0.0
+    max_output_tokens: 8192
+    context_window_tokens: 1048576
+  - kind: ollama
+    model: glm-5.3-flash
+    api_key_env: OLLAMA_API_KEY
+    base_url: https://ollama.com
+    request_timeout_seconds: 600
+    temperature: 0.0
+    max_output_tokens: 8192
+    context_window_tokens: 1048576
+
+target_limits:
+  # 사전 점검 3회 + Validation 24 batch + 선택 조합 Test 4 batch
+  max_requests: 31
+  max_attempts: 31
+  max_input_tokens: 3000000
+  max_output_tokens: 250000
+  max_wall_seconds: 21600
+
+selection:
+  min_mean_improvement: 0.01
+
+dataset:
+  split_counts:
+    development: 12
+    validation: 12
+    test: 12
+  answerable_counts:
+    development: 7
+    validation: 7
+    test: 8
+  minimum_family_counts:
+    development: 3
+    validation: 3
+    test: 3
+  minimum_tag_counts:
+    answerable: 22
+    unanswerable: 14
+  minimum_tag_counts_by_split:
+    development: &split_tags
+      filing-securities-registration: 1
+      filing-small-public-offering: 1
+      filing-material-fact: 1
+      amount: 1
+      quantity: 1
+      ratio: 1
+      date: 1
+      text: 1
+      table: 1
+      narrative: 1
+    validation: *split_tags
+    test: *split_tags
+  required_metrics:
+    - registration-offering-total
+    - registration-new-shares
+    - registration-subscription-end
+    - small-offering-total
+    - small-offering-issue-price
+    - small-offering-subscription-method
+    - material-fact-discount-rate
+    - material-fact-facility-funds
+    - material-fact-payment-date
+  unique_metric_count: 9
+  require_metrics_in_each_split: true
+
+workflow:
+  max_html_bytes: 5000000
+  html_preprocessing: compact
+  batch_questions_by_html: true
+  estimated_bytes_per_token: 2.0

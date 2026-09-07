@@ -15,7 +15,7 @@ from .config import OptimizationSettings
 from .dataset import dataset_sha256
 from .execution import CallLedger
 from .html_utils import read_html, sha256_bytes, sha256_file
-from .prompt_optimization import _atomic_json, _git_identity, run_case_v3
+from .prompt_optimization import _atomic_json, _git_identity, run_case_v3, run_cases_v3
 from .providers import ModelProvider, create_target_provider_v3
 from .schemas import CaseResultV3, EvaluationCaseV3
 
@@ -268,26 +268,63 @@ def run_html_robustness(
     project_root: str | Path,
     *,
     target_provider: ModelProvider | None = None,
+    authorize_external_transmission: bool = False,
 ) -> dict:
     root = Path(project_root).resolve()
     optimization = Path(optimization_dir).resolve()
     output = Path(output_dir).resolve()
-    opt_summary = json.loads((optimization / "summary.json").read_text(encoding="utf-8"))
-    if opt_summary.get("observed_status") != "complete":
-        raise ValueError("complete optimization 결과만 robustness에 사용할 수 있습니다")
-    prompt_path = optimization / "selected-prompt.md"
+    agent_manifest_path = optimization / "workflow-manifest.json"
+    if agent_manifest_path.exists():
+        from .agent_workflow import _scorer_bundle_sha256, _source_tree_sha256
+        from .schemas import AgentWorkflowManifestV3
+
+        agent_manifest = AgentWorkflowManifestV3.model_validate_json(
+            agent_manifest_path.read_text(encoding="utf-8")
+        )
+        if agent_manifest.phase != "reporting":
+            raise ValueError("Test가 완료된 Agent workflow만 robustness에 사용할 수 있습니다")
+        if agent_manifest.validation_stage_run_id is None:
+            raise ValueError("Agent workflow에 Validation stage가 없습니다")
+        prompt_path = (
+            optimization
+            / "validation"
+            / agent_manifest.validation_stage_run_id
+            / "selected-prompt.md"
+        )
+        expected_prompt_hash = agent_manifest.selected_prompt_sha256
+        expected_dataset_hash = agent_manifest.dataset_sha256
+        scorer_hash = _scorer_bundle_sha256(root)
+        if scorer_hash != agent_manifest.scorer_bundle_sha256:
+            raise ValueError("scorer bundle SHA-256이 Agent workflow와 다릅니다")
+        if _source_tree_sha256(root) != agent_manifest.source_tree_sha256:
+            raise ValueError("source tree SHA-256이 Agent workflow와 다릅니다")
+        lineage = {
+            "workflow_id": agent_manifest.workflow_id,
+            "test_campaign_id": agent_manifest.test_campaign_id,
+            "source_tree_sha256": agent_manifest.source_tree_sha256,
+        }
+    else:
+        opt_summary = json.loads(
+            (optimization / "summary.json").read_text(encoding="utf-8")
+        )
+        if opt_summary.get("observed_status") != "complete":
+            raise ValueError("complete optimization 결과만 robustness에 사용할 수 있습니다")
+        prompt_path = optimization / "selected-prompt.md"
+        expected_prompt_hash = opt_summary.get("selected_prompt_sha256")
+        expected_dataset_hash = opt_summary.get("dataset_sha256")
+        scorer_hash = sha256_file(Path(__file__).with_name("evaluation.py"))
+        current_git_sha, _ = _git_identity(root)
+        if current_git_sha != opt_summary.get("git_sha"):
+            raise ValueError("Git SHA가 optimization summary와 다릅니다")
+        lineage = {"git_sha": current_git_sha}
     prompt = prompt_path.read_text(encoding="utf-8")
-    if sha256_file(prompt_path) != opt_summary.get("selected_prompt_sha256"):
-        raise ValueError("selected prompt SHA-256이 optimization summary와 다릅니다")
+    if sha256_file(prompt_path) != expected_prompt_hash:
+        raise ValueError("selected prompt SHA-256이 optimization 결과와 다릅니다")
     current_dataset_hash = dataset_sha256(cases, root)
-    if current_dataset_hash != opt_summary.get("dataset_sha256"):
-        raise ValueError("dataset SHA-256이 optimization summary와 다릅니다")
-    scorer_hash = sha256_file(Path(__file__).with_name("evaluation.py"))
-    if scorer_hash != opt_summary.get("scorer_sha256"):
-        raise ValueError("scorer SHA-256이 optimization summary와 다릅니다")
-    current_git_sha, _ = _git_identity(root)
-    if current_git_sha != opt_summary.get("git_sha"):
-        raise ValueError("Git SHA가 optimization summary와 다릅니다")
+    if current_dataset_hash != expected_dataset_hash:
+        raise ValueError("dataset SHA-256이 optimization 결과와 다릅니다")
+    if settings.target_provider.kind != "recorded" and not authorize_external_transmission:
+        raise PermissionError("live robustness에는 명시적 외부 전송 승인이 필요합니다")
     artifacts = load_variant_manifest(manifest_path, root)
     reviews = load_variant_reviews(reviews_path, artifacts)
     by_id = {case.id: case for case in cases}
@@ -321,18 +358,24 @@ def run_html_robustness(
     evaluations: list[dict[str, str]] = []
     observed_status, error = "complete", None
     try:
-        for case_id in dict.fromkeys(item.case_id for item in artifacts):
-            case = by_id[case_id]
-            original = run_case_v3(
-                case,
-                run_id=output.name,
-                prompt_template=prompt,
-                prompt_variant="robustness-original",
-                max_html_bytes=settings.workflow.max_html_bytes,
-                provider=provider,
-                requested_model=settings.target_provider.model,
-                ledger=ledger,
-            )
+        original_cases = [
+            by_id[case_id]
+            for case_id in dict.fromkeys(item.case_id for item in artifacts)
+        ]
+        original_results = run_cases_v3(
+            original_cases,
+            run_id=output.name,
+            prompt_template=prompt,
+            prompt_variant="robustness-original",
+            workflow=settings.workflow,
+            provider=provider,
+            provider_settings=settings.target_provider,
+            requested_model=settings.target_provider.model,
+            ledger=ledger,
+            retry=settings.retry,
+        )
+        for original in original_results:
+            case_id = original.sample_id
             originals[case_id] = original
             evaluations.append(
                 {
@@ -349,7 +392,9 @@ def run_html_robustness(
                         {
                             "case_id": case_id,
                             "variant_id": "original",
-                            "result": original.model_dump(mode="json"),
+                            "result": original.model_dump(
+                                mode="json", exclude={"expected"}
+                            ),
                         },
                         ensure_ascii=False,
                         sort_keys=True,
@@ -373,6 +418,9 @@ def run_html_robustness(
                 provider=provider,
                 requested_model=settings.target_provider.model,
                 ledger=ledger,
+                retry=settings.retry,
+                workflow=settings.workflow,
+                provider_settings=settings.target_provider,
             )
             with responses_path.open("a", encoding="utf-8") as handle:
                 handle.write(
@@ -380,7 +428,9 @@ def run_html_robustness(
                         {
                             "case_id": artifact.case_id,
                             "variant_id": artifact.variant_id,
-                            "result": result.model_dump(mode="json"),
+                            "result": result.model_dump(
+                                mode="json", exclude={"expected"}
+                            ),
                         },
                         ensure_ascii=False,
                         sort_keys=True,
@@ -425,6 +475,7 @@ def run_html_robustness(
             f"{item.case_id}:{item.variant_id}": item.variant_html_sha256
             for item in artifacts
         },
+        **lineage,
     }
     _atomic_json(output / "evaluation-manifest.json", evaluation_manifest)
     summary = {
@@ -441,6 +492,7 @@ def run_html_robustness(
         "scorer_sha256": scorer_hash,
         "provider_usage": ledger.role_summary("target", settings.target_provider.model),
         "error": error,
+        **lineage,
     }
     _atomic_json(output / "summary.json", summary)
     return summary

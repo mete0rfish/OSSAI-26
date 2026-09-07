@@ -1,0 +1,55 @@
+artifact_schema_version: 3
+prompt_path: prompts/dart-qa-v3.md
+prompt_sha256: ce2bb24d5ef847b535c8c2f1fc83953d441ad44cd249da0ec5704fce558fe7ec
+
+target_provider:
+  kind: ollama
+  model: deepseek-v4-flash:0731
+  api_key_env: OLLAMA_API_KEY
+  base_url: https://ollama.com
+  request_timeout_seconds: 600
+  temperature: 0.0
+  max_output_tokens: 8192
+  context_window_tokens: 1048576
+
+target_limits:
+  max_requests: 4
+  max_attempts: 4
+  max_input_tokens: 2000000
+  max_output_tokens: 100000
+  max_wall_seconds: 7200
+
+dataset:
+  split_counts:
+    development: 12
+    validation: 12
+    test: 12
+  answerable_counts:
+    development: 7
+    validation: 7
+    test: 8
+  minimum_family_counts:
+    development: 3
+    validation: 3
+    test: 3
+  minimum_tag_counts:
+    answerable: 22
+    unanswerable: 14
+  required_metrics:
+    - registration-offering-total
+    - registration-new-shares
+    - registration-subscription-end
+    - small-offering-total
+    - small-offering-issue-price
+    - small-offering-subscription-method
+    - material-fact-discount-rate
+    - material-fact-facility-funds
+    - material-fact-payment-date
+  unique_metric_count: 9
+  require_metrics_in_each_split: true
+
+workflow:
+  max_html_bytes: 5000000
+  html_preprocessing: compact
+  batch_questions_by_html: true
+  estimated_bytes_per_token: 2.0

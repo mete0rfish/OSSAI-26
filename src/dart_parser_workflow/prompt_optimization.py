@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
+import time
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import fmean
 
-from .config import OptimizationSettings
+from .config import OptimizationSettings, ProviderSettings, RetrySettings, WorkflowSettings
 from .dataset import dataset_sha256
 from .evaluation import normalize_scalar, score_answer_v3
-from .execution import BudgetExceeded, CallLedger
-from .html_utils import read_html, sha256_file
-from .prompts import load_prompt, render_prompt, validate_prompt_template
+from .execution import BudgetExceeded, CallLedger, classify_provider_error
+from .html_utils import PreparedHtml, prepare_html, sha256_file
+from .prompts import load_prompt, render_batch_prompt, render_prompt, validate_prompt_template
 from .providers import (
     ModelProvider,
     OptimizerProvider,
@@ -22,7 +25,10 @@ from .providers import (
     create_target_provider_v3,
 )
 from .schemas import (
+    BatchDisclosureAnswer,
+    BatchGenerationRequest,
     CaseResultV3,
+    DevelopmentFailureV3,
     EvaluationCaseV3,
     GenerationRequest,
     ModelUsage,
@@ -30,6 +36,10 @@ from .schemas import (
     ScoreBreakdown,
     SelectionSummary,
 )
+
+
+class _SelectionInconclusive(RuntimeError):
+    """Stop before Test without converting an inconclusive selection to a partial run."""
 
 
 def _sha256_text(value: str) -> str:
@@ -83,6 +93,7 @@ def _error_result(
     model: str,
     status: str,
     error: str,
+    prepared: PreparedHtml | None = None,
 ) -> CaseResultV3:
     return CaseResultV3(
         run_id=run_id,
@@ -92,6 +103,10 @@ def _error_result(
         prompt_variant=prompt_variant,
         html_path=str(case.html_path),
         html_sha256=case.html_sha256,
+        html_preprocessor=prepared.preprocessor if prepared else "raw",
+        prepared_html_sha256=prepared.prepared_sha256 if prepared else None,
+        raw_html_bytes=prepared.raw_bytes if prepared else None,
+        prepared_html_bytes=prepared.prepared_bytes if prepared else None,
         question=case.question,
         expected=case.expected,
         answerable=not case.expected.abstained,
@@ -103,77 +118,43 @@ def _error_result(
     )
 
 
-def run_case_v3(
+def _estimated_input_tokens(prompt: str, workflow: WorkflowSettings) -> int:
+    return math.ceil(len(prompt.encode()) / workflow.estimated_bytes_per_token)
+
+
+def _context_error(
+    prompt: str,
+    workflow: WorkflowSettings,
+    provider: ProviderSettings | None,
+) -> str | None:
+    if provider is None or provider.context_window_tokens is None:
+        return None
+    estimated = _estimated_input_tokens(prompt, workflow)
+    reserved = provider.max_output_tokens
+    if estimated + reserved <= provider.context_window_tokens:
+        return None
+    return (
+        "input_context_exceeded: "
+        f"estimated_input_tokens={estimated}, reserved_output_tokens={reserved}, "
+        f"context_window_tokens={provider.context_window_tokens}"
+    )
+
+
+def _case_result(
     case: EvaluationCaseV3,
     *,
     run_id: str,
-    prompt_template: str,
     prompt_variant: str,
-    max_html_bytes: int,
-    provider: ModelProvider,
+    template_hash: str,
+    prepared: PreparedHtml,
+    answer: BatchDisclosureAnswer,
     requested_model: str,
-    ledger: CallLedger,
+    actual_model: str | None,
+    latency_seconds: float,
+    input_tokens: int | None,
+    output_tokens: int | None,
 ) -> CaseResultV3:
-    template_hash = _sha256_text(prompt_template)
-    try:
-        _, html = read_html(case.html_path, max_html_bytes)
-    except ValueError as exc:
-        return _error_result(
-            case,
-            run_id=run_id,
-            prompt_variant=prompt_variant,
-            prompt_sha256=template_hash,
-            model=requested_model,
-            status="input_error",
-            error=str(exc),
-        )
-    prompt = render_prompt(prompt_template, case.question, html)
-    ledger.before_request("target")
-    try:
-        response = provider.generate(
-            GenerationRequest(
-                sample_id=case.id,
-                prompt=prompt,
-                provider_role="target",
-                prompt_variant=prompt_variant,
-            )
-        )
-    except Exception as exc:
-        error = f"{type(exc).__name__}: {str(exc)[:2000]}"
-        ledger.record(
-            role="target",
-            sample_id=case.id,
-            prompt_variant=prompt_variant,
-            prompt=prompt,
-            requested_model=requested_model,
-            actual_model=None,
-            usage=ModelUsage(),
-            latency_seconds=None,
-            html_sha256=case.html_sha256,
-            error=error,
-        )
-        return _error_result(
-            case,
-            run_id=run_id,
-            prompt_variant=prompt_variant,
-            prompt_sha256=template_hash,
-            model=requested_model,
-            status="generation_error",
-            error=error,
-        )
-    ledger.record(
-        role="target",
-        sample_id=case.id,
-        prompt_variant=prompt_variant,
-        prompt=prompt,
-        requested_model=response.requested_model,
-        actual_model=response.actual_model,
-        usage=response.usage,
-        latency_seconds=response.latency_seconds,
-        html_sha256=case.html_sha256,
-    )
-    answer = response.result
-    score, status = score_answer_v3(case, answer, html)
+    score, status = score_answer_v3(case, answer, prepared.raw_html)
     return CaseResultV3(
         run_id=run_id,
         sample_id=case.id,
@@ -182,6 +163,10 @@ def run_case_v3(
         prompt_variant=prompt_variant,
         html_path=str(case.html_path),
         html_sha256=case.html_sha256,
+        html_preprocessor=prepared.preprocessor,
+        prepared_html_sha256=prepared.prepared_sha256,
+        raw_html_bytes=prepared.raw_bytes,
+        prepared_html_bytes=prepared.prepared_bytes,
         question=case.question,
         expected=case.expected,
         answerable=not case.expected.abstained,
@@ -194,11 +179,396 @@ def run_case_v3(
         score=score,
         status=status,
         prompt_sha256=template_hash,
+        requested_model=requested_model,
+        actual_model=actual_model,
+        latency_seconds=latency_seconds,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+def _usage_share(value: int | None, index: int, count: int) -> int | None:
+    if value is None:
+        return None
+    quotient, remainder = divmod(value, count)
+    return quotient + int(index < remainder)
+
+
+def run_case_v3(
+    case: EvaluationCaseV3,
+    *,
+    run_id: str,
+    prompt_template: str,
+    prompt_variant: str,
+    max_html_bytes: int,
+    provider: ModelProvider,
+    requested_model: str,
+    ledger: CallLedger,
+    retry: RetrySettings | None = None,
+    before_attempt: Callable[[str, int], None] | None = None,
+    workflow: WorkflowSettings | None = None,
+    provider_settings: ProviderSettings | None = None,
+) -> CaseResultV3:
+    template_hash = _sha256_text(prompt_template)
+    workflow = workflow or WorkflowSettings(max_html_bytes=max_html_bytes)
+    try:
+        prepared = prepare_html(
+            case.html_path,
+            max_html_bytes,
+            workflow.html_preprocessing,
+        )
+    except ValueError as exc:
+        return _error_result(
+            case,
+            run_id=run_id,
+            prompt_variant=prompt_variant,
+            prompt_sha256=template_hash,
+            model=requested_model,
+            status="input_error",
+            error=str(exc),
+        )
+    prompt = render_prompt(prompt_template, case.question, prepared.model_input)
+    if error := _context_error(prompt, workflow, provider_settings):
+        return _error_result(
+            case,
+            run_id=run_id,
+            prompt_variant=prompt_variant,
+            prompt_sha256=template_hash,
+            model=requested_model,
+            status="input_error",
+            error=error,
+            prepared=prepared,
+        )
+    retry_policy = retry or RetrySettings()
+    for attempt in range(retry_policy.max_attempts_per_call):
+        ledger.before_request("target")
+        if before_attempt is not None:
+            before_attempt(case.id, attempt)
+        try:
+            response = provider.generate(
+                GenerationRequest(
+                    sample_id=case.id,
+                    attempt=attempt,
+                    prompt=prompt,
+                    provider_role="target",
+                    prompt_variant=prompt_variant,
+                )
+            )
+        except Exception as exc:
+            classified = classify_provider_error(exc, retry_policy)
+            ledger.record(
+                role="target",
+                sample_id=case.id,
+                prompt_variant=prompt_variant,
+                prompt=prompt,
+                requested_model=requested_model,
+                actual_model=None,
+                usage=ModelUsage(),
+                latency_seconds=None,
+                html_sha256=case.html_sha256,
+                html_preprocessor=prepared.preprocessor,
+                prepared_html_sha256=prepared.prepared_sha256,
+                raw_html_bytes=prepared.raw_bytes,
+                prepared_html_bytes=prepared.prepared_bytes,
+                estimated_input_tokens=_estimated_input_tokens(prompt, workflow),
+                attempt=attempt,
+                error=classified.summary(),
+            )
+            if classified.retryable and attempt + 1 < retry_policy.max_attempts_per_call:
+                delay = retry_policy.initial_backoff_seconds * (2**attempt)
+                if delay:
+                    time.sleep(delay)
+                continue
+            return _error_result(
+                case,
+                run_id=run_id,
+                prompt_variant=prompt_variant,
+                prompt_sha256=template_hash,
+                model=requested_model,
+                status="generation_error",
+                error=classified.summary(),
+                prepared=prepared,
+            )
+        break
+    else:  # pragma: no cover - the validated retry count is always positive
+        raise AssertionError("retry loop가 실행되지 않았습니다")
+    ledger.record(
+        role="target",
+        sample_id=case.id,
+        prompt_variant=prompt_variant,
+        prompt=prompt,
+        requested_model=response.requested_model,
+        actual_model=response.actual_model,
+        usage=response.usage,
+        latency_seconds=response.latency_seconds,
+        html_sha256=case.html_sha256,
+        html_preprocessor=prepared.preprocessor,
+        prepared_html_sha256=prepared.prepared_sha256,
+        raw_html_bytes=prepared.raw_bytes,
+        prepared_html_bytes=prepared.prepared_bytes,
+        estimated_input_tokens=_estimated_input_tokens(prompt, workflow),
+        attempt=attempt,
+    )
+    answer = BatchDisclosureAnswer(
+        sample_id=case.id,
+        **response.result.model_dump(),
+    )
+    return _case_result(
+        case,
+        run_id=run_id,
+        prompt_variant=prompt_variant,
+        template_hash=template_hash,
+        prepared=prepared,
+        answer=answer,
         requested_model=response.requested_model,
         actual_model=response.actual_model,
         latency_seconds=response.latency_seconds,
         input_tokens=response.usage.input_tokens,
         output_tokens=response.usage.output_tokens,
+    )
+
+
+def _run_batch_v3(
+    cases: list[EvaluationCaseV3],
+    *,
+    run_id: str,
+    prompt_template: str,
+    prompt_variant: str,
+    workflow: WorkflowSettings,
+    provider: ModelProvider,
+    provider_settings: ProviderSettings,
+    requested_model: str,
+    ledger: CallLedger,
+    retry: RetrySettings,
+    before_attempt: Callable[[str, int], None] | None,
+) -> list[CaseResultV3]:
+    template_hash = _sha256_text(prompt_template)
+    try:
+        prepared = prepare_html(
+            cases[0].html_path,
+            workflow.max_html_bytes,
+            workflow.html_preprocessing,
+        )
+    except ValueError as exc:
+        return [
+            _error_result(
+                case,
+                run_id=run_id,
+                prompt_variant=prompt_variant,
+                prompt_sha256=template_hash,
+                model=requested_model,
+                status="input_error",
+                error=str(exc),
+            )
+            for case in cases
+        ]
+    questions = [(case.id, case.question) for case in cases]
+    prompt = render_batch_prompt(prompt_template, questions, prepared.model_input)
+    if error := _context_error(prompt, workflow, provider_settings):
+        return [
+            _error_result(
+                case,
+                run_id=run_id,
+                prompt_variant=prompt_variant,
+                prompt_sha256=template_hash,
+                model=requested_model,
+                status="input_error",
+                error=error,
+                prepared=prepared,
+            )
+            for case in cases
+        ]
+    sample_ids = [case.id for case in cases]
+    batch_id = "batch:" + ",".join(sample_ids)
+    generate_batch = provider.generate_batch  # type: ignore[attr-defined]
+    for attempt in range(retry.max_attempts_per_call):
+        ledger.before_request("target")
+        if before_attempt is not None:
+            for sample_id in sample_ids:
+                before_attempt(sample_id, attempt)
+        try:
+            response = generate_batch(
+                BatchGenerationRequest(
+                    sample_ids=sample_ids,
+                    attempt=attempt,
+                    prompt=prompt,
+                    provider_role="target",
+                    prompt_variant=prompt_variant,
+                )
+            )
+            returned_ids = [answer.sample_id for answer in response.result.answers]
+            if returned_ids != sample_ids:
+                raise ValueError(
+                    "batch 응답 sample_id 또는 순서가 요청과 일치하지 않습니다"
+                )
+        except Exception as exc:
+            classified = classify_provider_error(exc, retry)
+            ledger.record(
+                role="target",
+                sample_id=batch_id,
+                prompt_variant=prompt_variant,
+                prompt=prompt,
+                requested_model=requested_model,
+                actual_model=None,
+                usage=ModelUsage(),
+                latency_seconds=None,
+                html_sha256=cases[0].html_sha256,
+                html_preprocessor=prepared.preprocessor,
+                prepared_html_sha256=prepared.prepared_sha256,
+                raw_html_bytes=prepared.raw_bytes,
+                prepared_html_bytes=prepared.prepared_bytes,
+                estimated_input_tokens=_estimated_input_tokens(prompt, workflow),
+                batch_size=len(cases),
+                attempt=attempt,
+                error=classified.summary(),
+            )
+            if classified.retryable and attempt + 1 < retry.max_attempts_per_call:
+                delay = retry.initial_backoff_seconds * (2**attempt)
+                if delay:
+                    time.sleep(delay)
+                continue
+            return [
+                _error_result(
+                    case,
+                    run_id=run_id,
+                    prompt_variant=prompt_variant,
+                    prompt_sha256=template_hash,
+                    model=requested_model,
+                    status="generation_error",
+                    error=classified.summary(),
+                    prepared=prepared,
+                )
+                for case in cases
+            ]
+        break
+    else:  # pragma: no cover - retry count is validated as positive
+        raise AssertionError("retry loop가 실행되지 않았습니다")
+    ledger.record(
+        role="target",
+        sample_id=batch_id,
+        prompt_variant=prompt_variant,
+        prompt=prompt,
+        requested_model=response.requested_model,
+        actual_model=response.actual_model,
+        usage=response.usage,
+        latency_seconds=response.latency_seconds,
+        html_sha256=cases[0].html_sha256,
+        html_preprocessor=prepared.preprocessor,
+        prepared_html_sha256=prepared.prepared_sha256,
+        raw_html_bytes=prepared.raw_bytes,
+        prepared_html_bytes=prepared.prepared_bytes,
+        estimated_input_tokens=_estimated_input_tokens(prompt, workflow),
+        batch_size=len(cases),
+        attempt=attempt,
+    )
+    return [
+        _case_result(
+            case,
+            run_id=run_id,
+            prompt_variant=prompt_variant,
+            template_hash=template_hash,
+            prepared=prepared,
+            answer=answer,
+            requested_model=response.requested_model,
+            actual_model=response.actual_model,
+            latency_seconds=response.latency_seconds,
+            input_tokens=_usage_share(response.usage.input_tokens, index, len(cases)),
+            output_tokens=_usage_share(response.usage.output_tokens, index, len(cases)),
+        )
+        for index, (case, answer) in enumerate(
+            zip(cases, response.result.answers, strict=True)
+        )
+    ]
+
+
+def iter_cases_v3(
+    cases: list[EvaluationCaseV3],
+    *,
+    run_id: str,
+    prompt_template: str,
+    prompt_variant: str,
+    workflow: WorkflowSettings,
+    provider: ModelProvider,
+    provider_settings: ProviderSettings,
+    requested_model: str,
+    ledger: CallLedger,
+    retry: RetrySettings,
+    before_attempt: Callable[[str, int], None] | None = None,
+) -> Iterator[CaseResultV3]:
+    """split 경계를 지키며 같은 HTML의 질문을 한 provider 호출로 묶는다."""
+
+    grouped: dict[tuple[str, str], list[EvaluationCaseV3]] = {}
+    for case in cases:
+        grouped.setdefault((case.split, case.html_sha256), []).append(case)
+    for grouped_cases in grouped.values():
+        can_batch = (
+            workflow.batch_questions_by_html
+            and len(grouped_cases) > 1
+            and callable(getattr(provider, "generate_batch", None))
+        )
+        if can_batch:
+            batch_results = _run_batch_v3(
+                grouped_cases,
+                run_id=run_id,
+                prompt_template=prompt_template,
+                prompt_variant=prompt_variant,
+                workflow=workflow,
+                provider=provider,
+                provider_settings=provider_settings,
+                requested_model=requested_model,
+                ledger=ledger,
+                retry=retry,
+                before_attempt=before_attempt,
+            )
+        else:
+            batch_results = [
+                run_case_v3(
+                    case,
+                    run_id=run_id,
+                    prompt_template=prompt_template,
+                    prompt_variant=prompt_variant,
+                    max_html_bytes=workflow.max_html_bytes,
+                    provider=provider,
+                    requested_model=requested_model,
+                    ledger=ledger,
+                    retry=retry,
+                    before_attempt=before_attempt,
+                    workflow=workflow,
+                    provider_settings=provider_settings,
+                )
+                for case in grouped_cases
+            ]
+        yield from batch_results
+
+
+def run_cases_v3(
+    cases: list[EvaluationCaseV3],
+    *,
+    run_id: str,
+    prompt_template: str,
+    prompt_variant: str,
+    workflow: WorkflowSettings,
+    provider: ModelProvider,
+    provider_settings: ProviderSettings,
+    requested_model: str,
+    ledger: CallLedger,
+    retry: RetrySettings,
+    before_attempt: Callable[[str, int], None] | None = None,
+) -> list[CaseResultV3]:
+    return list(
+        iter_cases_v3(
+            cases,
+            run_id=run_id,
+            prompt_template=prompt_template,
+            prompt_variant=prompt_variant,
+            workflow=workflow,
+            provider=provider,
+            provider_settings=provider_settings,
+            requested_model=requested_model,
+            ledger=ledger,
+            retry=retry,
+            before_attempt=before_attempt,
+        )
     )
 
 
@@ -243,14 +613,14 @@ def select_prompt(
             int(candidate["answerable_abstentions"]) if candidate else None
         ),
     }
+    if baseline["error_count"] or (candidate and candidate["error_count"]):
+        return SelectionSummary(selected="none", reason="validation_inconclusive", **common)
     if optimizer_error:
         return SelectionSummary(selected="baseline", reason="optimizer_error", **common)
     if candidate_prompt == baseline_prompt:
         return SelectionSummary(selected="baseline", reason="candidate_identical", **common)
     assert candidate is not None
-    if candidate["error_count"] > baseline["error_count"]:
-        reason = "validation_errors_increased"
-    elif candidate["answerable_abstentions"] > baseline["answerable_abstentions"]:
+    if candidate["answerable_abstentions"] > baseline["answerable_abstentions"]:
         reason = "answerable_abstentions_increased"
     elif candidate["strict_pass_rate"] < baseline["strict_pass_rate"]:
         reason = "strict_pass_rate_decreased"
@@ -265,21 +635,23 @@ def build_optimizer_prompt(
     baseline_prompt: str, development_failures: list[CaseResultV3]
 ) -> str:
     rows = [
-        {
-            "sample_id": item.sample_id,
-            "question": item.question,
-            "expected": item.expected.model_dump(mode="json"),
-            "answer": item.answer,
-            "evidence": [e.quote for e in item.evidence],
-            "quality_score": item.score.quality_score,
-            "failure_reasons": item.score.failure_reasons,
-            "missing_context": item.score.missing_context,
-        }
+        DevelopmentFailureV3(
+            sample_id=item.sample_id,
+            question=item.question,
+            expected=item.expected,
+            answer=item.answer,
+            evidence=[e.quote for e in item.evidence],
+            quality_score=item.score.quality_score,
+            failure_reasons=item.score.failure_reasons,
+            missing_context=item.score.missing_context,
+        ).model_dump(mode="json")
         for item in development_failures
     ]
     return (
         "아래 DART 질의응답 baseline을 development 실패만 참고해 개선하세요. "
         "validation/test를 추측하거나 기대 답을 prompt에 넣지 마세요. "
+        "사용자가 제공한 질문을 요약·교정·보완·번역·재작성하지 않고 수정 없이 그대로 "
+        "사용하라는 지침을 반드시 보존하세요. "
         "{question}과 {html} placeholder를 정확히 한 번씩 보존하고 JSON 객체로 응답하세요.\n\n"
         f"[baseline]\n{baseline_prompt}\n\n"
         "[development failures]\n"
@@ -297,21 +669,27 @@ def _run_split(
     settings: OptimizationSettings,
     provider: ModelProvider,
     ledger: CallLedger,
+    redact_expected: bool = False,
 ) -> list[CaseResultV3]:
-    results: list[CaseResultV3] = []
-    for case in cases:
-        result = run_case_v3(
-            case,
-            run_id=run_id,
-            prompt_template=prompt,
-            prompt_variant=prompt_variant,
-            max_html_bytes=settings.workflow.max_html_bytes,
-            provider=provider,
-            requested_model=settings.target_provider.model,
-            ledger=ledger,
-        )
+    results = []
+    iterator = iter_cases_v3(
+        cases,
+        run_id=run_id,
+        prompt_template=prompt,
+        prompt_variant=prompt_variant,
+        workflow=settings.workflow,
+        provider=provider,
+        provider_settings=settings.target_provider,
+        requested_model=settings.target_provider.model,
+        ledger=ledger,
+        retry=settings.retry,
+    )
+    for result in iterator:
         results.append(result)
-        _append_jsonl(output_path, result.model_dump(mode="json"))
+        artifact = result.model_dump(mode="json")
+        if redact_expected:
+            artifact.pop("expected")
+        _append_jsonl(output_path, artifact)
     return results
 
 
@@ -323,8 +701,17 @@ def run_prompt_optimization(
     *,
     target_provider: ModelProvider | None = None,
     optimizer_provider: OptimizerProvider | None = None,
+    authorize_external_transmission: bool = False,
 ) -> dict:
     root, output = Path(project_root).resolve(), Path(output_dir).resolve()
+    if (
+        any(
+            provider.kind != "recorded"
+            for provider in (settings.target_provider, settings.optimizer_provider)
+        )
+        and not authorize_external_transmission
+    ):
+        raise PermissionError("live 최적화에는 명시적 외부 전송 승인이 필요합니다")
     baseline_path = Path(settings.baseline_prompt)
     if not baseline_path.is_absolute():
         baseline_path = root / baseline_path
@@ -356,6 +743,7 @@ def run_prompt_optimization(
         "candidate_prompt_sha256": None,
         "selected_prompt_sha256": None,
         "scorer_sha256": sha256_file(Path(__file__).with_name("evaluation.py")),
+        "input_preparation": settings.workflow.model_dump(mode="json"),
         "test_used_for_generation_or_selection": False,
         "selection": None,
         "provider_usage": {},
@@ -393,7 +781,12 @@ def run_prompt_optimization(
             provider=active_target,
             ledger=ledger,
         )
-        failures = [item for item in development if not item.score.strict_pass]
+        failures = [
+            item
+            for item in development
+            if not item.score.strict_pass
+            and item.status not in {"input_error", "generation_error"}
+        ]
         optimizer_failed = False
         candidate = baseline
         if failures:
@@ -469,6 +862,23 @@ def run_prompt_optimization(
             min_mean_improvement=settings.selection.min_mean_improvement,
             optimizer_error=optimizer_failed,
         )
+        if selection.selected == "none":
+            summary.update(
+                observed_status="complete",
+                quality_status="inconclusive",
+                finished_at=datetime.now(UTC).isoformat(),
+                candidate_prompt_sha256=_sha256_text(candidate),
+                selection=selection.model_dump(mode="json"),
+                provider_usage={
+                    "target": ledger.role_summary(
+                        "target", settings.target_provider.model
+                    ),
+                    "optimizer": ledger.role_summary(
+                        "optimizer", settings.optimizer_provider.model
+                    ),
+                },
+            )
+            raise _SelectionInconclusive
         selected_prompt = candidate if selection.selected == "candidate" else baseline
         (output / "selected-prompt.md").write_text(selected_prompt, encoding="utf-8")
         test_results = _run_split(
@@ -480,6 +890,7 @@ def run_prompt_optimization(
             settings=settings,
             provider=active_target,
             ledger=ledger,
+            redact_expected=True,
         )
         ledger.assert_within_limits("target")
         ledger.assert_within_limits("optimizer")
@@ -501,6 +912,8 @@ def run_prompt_optimization(
                 ),
             },
         )
+    except _SelectionInconclusive:
+        pass
     except Exception as exc:
         summary.update(
             observed_status="partial",

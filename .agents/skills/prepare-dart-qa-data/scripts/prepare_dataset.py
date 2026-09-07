@@ -4,42 +4,21 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from dart_parser_workflow.config import load_optimization_settings
+from dart_parser_workflow.config import load_dataset_validation_settings
 from dart_parser_workflow.dataset import dataset_sha256, load_cases_v3, validate_cases_v3
+from dart_parser_workflow.dataset_review import (
+    ReviewRow,
+    review_case_sha256,
+    validate_approved_reviews,
+)
 from dart_parser_workflow.html_utils import read_html, sha256_bytes
 from dart_parser_workflow.schemas import EvaluationCaseV3
-
-
-class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class ReviewChecks(StrictModel):
-    answer: bool | None = None
-    period: bool | None = None
-    scope: bool | None = None
-    unit: bool | None = None
-    evidence: bool | None = None
-
-
-class ReviewRow(StrictModel):
-    schema_version: Literal[1] = 1
-    case_id: str = Field(min_length=1)
-    case_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    reviewer: str = ""
-    decision: Literal["pending", "approved", "revise"] = "pending"
-    checks: ReviewChecks = Field(default_factory=ReviewChecks)
-    notes: str = ""
 
 
 def _jsonl_rows(path: Path, label: str) -> list[dict]:
@@ -109,13 +88,6 @@ def _jsonl(values: list[dict]) -> str:
     )
 
 
-def _case_sha256(row: dict) -> str:
-    payload = json.dumps(
-        row, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
 def _relative_case(case: EvaluationCaseV3, root: Path) -> dict:
     row = case.model_dump(mode="json")
     row["html_path"] = case.html_path.resolve().relative_to(root).as_posix()
@@ -168,7 +140,7 @@ def materialize(
     review_rows = [
         ReviewRow(
             case_id=case.id,
-            case_sha256=_case_sha256(row),
+            case_sha256=review_case_sha256(row),
         ).model_dump(mode="json")
         for case, row in zip(cases, prepared_rows, strict=True)
     ]
@@ -182,40 +154,6 @@ def materialize(
     }
 
 
-def _approved_reviews(path: Path, case_hashes: dict[str, str]) -> list[ReviewRow]:
-    reviews: list[ReviewRow] = []
-    seen: set[str] = set()
-    for line_number, value in enumerate(_jsonl_rows(path, "review JSONL"), 1):
-        try:
-            review = ReviewRow.model_validate(value)
-        except ValueError as exc:
-            raise ValueError(f"review JSONL {line_number}행이 유효하지 않습니다: {exc}") from exc
-        if review.case_id in seen:
-            raise ValueError(f"중복된 review case_id입니다: {review.case_id}")
-        if review.case_id not in case_hashes:
-            raise ValueError(f"dataset에 없는 review case_id입니다: {review.case_id}")
-        if review.case_sha256 != case_hashes[review.case_id]:
-            raise ValueError(f"review case SHA-256이 일치하지 않습니다: {review.case_id}")
-        seen.add(review.case_id)
-        reviews.append(review)
-
-    missing = sorted(set(case_hashes) - seen)
-    if missing:
-        raise ValueError(f"review가 누락된 case입니다: {missing}")
-    for review in reviews:
-        if review.decision != "approved":
-            raise ValueError(
-                f"승인되지 않은 review입니다: {review.case_id}={review.decision}"
-            )
-        if not review.reviewer.strip():
-            raise ValueError(f"reviewer가 비어 있습니다: {review.case_id}")
-        checks = review.checks.model_dump()
-        incomplete = sorted(name for name, passed in checks.items() if passed is not True)
-        if incomplete:
-            raise ValueError(f"review check가 완료되지 않았습니다: {review.case_id}={incomplete}")
-    return reviews
-
-
 def finalize(
     *,
     prepared_path: Path,
@@ -227,19 +165,15 @@ def finalize(
     root = project_root.resolve()
     output = _within_root(output_path, root, "final dataset 출력")
     _new_output(output)
-    settings = load_optimization_settings(config_path)
+    workflow, requirements = load_dataset_validation_settings(config_path)
     cases = load_cases_v3(
         prepared_path,
         root,
-        max_html_bytes=settings.workflow.max_html_bytes,
-        requirements=settings.dataset,
+        max_html_bytes=workflow.max_html_bytes,
+        requirements=requirements,
     )
     final_rows = [_relative_case(case, root) for case in cases]
-    case_hashes = {
-        case.id: _case_sha256(row)
-        for case, row in zip(cases, final_rows, strict=True)
-    }
-    reviews = _approved_reviews(reviews_path, case_hashes)
+    reviews = validate_approved_reviews(cases, reviews_path, root)
     digest = dataset_sha256(cases, root)
     _write_new_text(output, _jsonl(final_rows))
     return {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -16,6 +17,10 @@ from pydantic import BaseModel
 
 from .config import ProviderSettings
 from .schemas import (
+    BatchDisclosureAnswer,
+    BatchDisclosureAnswers,
+    BatchGenerationRequest,
+    BatchProviderResponse,
     DisclosureAnswer,
     GenerationRequest,
     ModelUsage,
@@ -30,8 +35,26 @@ class ModelProvider(Protocol):
     def generate(self, request: GenerationRequest) -> ProviderResponse: ...
 
 
+class BatchModelProvider(ModelProvider, Protocol):
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse: ...
+
+
 class OptimizerProvider(Protocol):
     def propose(self, request: OptimizationRequest) -> OptimizerResponse: ...
+
+
+_JSON_CODE_FENCE = re.compile(
+    r"\A```json[ \t]*\r?\n(?P<body>.*)\r?\n```[ \t]*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _unwrap_json_code_fence(content: str) -> str:
+    stripped = content.strip()
+    match = _JSON_CODE_FENCE.fullmatch(stripped)
+    if match is None:
+        return content
+    return match.group("body")
 
 
 def _gemini_generation_config(
@@ -81,6 +104,33 @@ class GeminiProvider:
             requested_model=self.settings.model,
             actual_model=getattr(response, "model_version", None) or self.settings.model,
             usage=usage,
+            latency_seconds=latency,
+        )
+
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse:
+        started = time.monotonic()
+        response = self.client.models.generate_content(
+            model=self.settings.model,
+            contents=request.prompt,
+            config=_gemini_generation_config(self.settings, BatchDisclosureAnswers),
+        )
+        latency = time.monotonic() - started
+        parsed = response.parsed
+        if isinstance(parsed, BatchDisclosureAnswers):
+            result = parsed
+        elif parsed is not None:
+            result = BatchDisclosureAnswers.model_validate(parsed)
+        else:
+            result = BatchDisclosureAnswers.model_validate_json(response.text)
+        metadata = getattr(response, "usage_metadata", None)
+        return BatchProviderResponse(
+            result=result,
+            requested_model=self.settings.model,
+            actual_model=getattr(response, "model_version", None) or self.settings.model,
+            usage=ModelUsage(
+                input_tokens=getattr(metadata, "prompt_token_count", None),
+                output_tokens=getattr(metadata, "candidates_token_count", None),
+            ),
             latency_seconds=latency,
         )
 
@@ -179,7 +229,7 @@ def _ollama_chat(
         content = value["message"]["content"]
         if not isinstance(content, str):
             raise TypeError("message.content가 문자열이 아닙니다")
-        parsed = response_model.model_validate_json(content)
+        parsed = response_model.model_validate_json(_unwrap_json_code_fence(content))
     except (KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"Ollama 구조화 응답이 유효하지 않습니다: {exc}") from exc
     return parsed, value, latency
@@ -196,6 +246,40 @@ def _ollama_api_key(settings: ProviderSettings) -> str | None:
     return api_key
 
 
+def list_ollama_models(settings: ProviderSettings) -> list[str]:
+    """Ollama `/api/tags`가 반환한 정확한 model ID를 정렬해 반환한다."""
+
+    if settings.kind != "ollama":
+        raise ValueError("Ollama model 조회에는 ollama provider 설정이 필요합니다")
+    api_key = _ollama_api_key(settings)
+    headers = {"Accept": "application/json"}
+    if api_key is not None:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(
+        f"{settings.base_url}/api/tags",
+        headers=headers,
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=settings.request_timeout_seconds,
+        ) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:2000]
+        raise RuntimeError(f"Ollama model 조회 HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Ollama model 조회 실패: {exc.reason}") from exc
+    try:
+        value = json.loads(raw)
+        rows = value["models"]
+        names = [str(row.get("model") or row["name"]) for row in rows]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Ollama model 목록 응답이 유효하지 않습니다: {exc}") from exc
+    return sorted(set(names))
+
+
 class OllamaProvider:
     def __init__(self, settings: ProviderSettings) -> None:
         self.settings = settings
@@ -210,6 +294,25 @@ class OllamaProvider:
         )
         assert isinstance(parsed, DisclosureAnswer)
         return ProviderResponse(
+            result=parsed,
+            requested_model=self.settings.model,
+            actual_model=str(response.get("model") or self.settings.model),
+            usage=ModelUsage(
+                input_tokens=response.get("prompt_eval_count"),
+                output_tokens=response.get("eval_count"),
+            ),
+            latency_seconds=latency,
+        )
+
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse:
+        parsed, response, latency = _ollama_chat(
+            self.settings,
+            request.prompt,
+            BatchDisclosureAnswers,
+            self.api_key,
+        )
+        assert isinstance(parsed, BatchDisclosureAnswers)
+        return BatchProviderResponse(
             result=parsed,
             requested_model=self.settings.model,
             actual_model=str(response.get("model") or self.settings.model),
@@ -343,6 +446,26 @@ class NvidiaNimProvider:
             latency_seconds=latency,
         )
 
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse:
+        parsed, response, latency = _nvidia_nim_chat(
+            self.settings,
+            request.prompt,
+            BatchDisclosureAnswers,
+            self.api_key,
+        )
+        assert isinstance(parsed, BatchDisclosureAnswers)
+        usage = response.get("usage") or {}
+        return BatchProviderResponse(
+            result=parsed,
+            requested_model=self.settings.model,
+            actual_model=str(response.get("model") or self.settings.model),
+            usage=ModelUsage(
+                input_tokens=usage.get("prompt_tokens"),
+                output_tokens=usage.get("completion_tokens"),
+            ),
+            latency_seconds=latency,
+        )
+
 
 class NvidiaNimOptimizerProvider:
     def __init__(self, settings: ProviderSettings) -> None:
@@ -441,6 +564,44 @@ class RoleRecordedProvider:
             requested_model=self.model,
             actual_model=str(row.get("actual_model", self.model)),
             usage=self._usage(row),
+            latency_seconds=time.monotonic() - started,
+        )
+
+    def generate_batch(self, request: BatchGenerationRequest) -> BatchProviderResponse:
+        started = time.monotonic()
+        rows = [
+            self._row(
+                request.provider_role,
+                sample_id,
+                request.prompt_variant,
+                request.attempt,
+            )
+            for sample_id in request.sample_ids
+        ]
+        usages = [self._usage(row) for row in rows]
+
+        def total(name: str) -> int | None:
+            values = [getattr(usage, name) for usage in usages]
+            if all(value is None for value in values):
+                return None
+            return sum(value or 0 for value in values)
+
+        return BatchProviderResponse(
+            result=BatchDisclosureAnswers(
+                answers=[
+                    BatchDisclosureAnswer(
+                        sample_id=sample_id,
+                        **DisclosureAnswer.model_validate(row["response"]).model_dump(),
+                    )
+                    for sample_id, row in zip(request.sample_ids, rows, strict=True)
+                ]
+            ),
+            requested_model=self.model,
+            actual_model=self.model,
+            usage=ModelUsage(
+                input_tokens=total("input_tokens"),
+                output_tokens=total("output_tokens"),
+            ),
             latency_seconds=time.monotonic() - started,
         )
 

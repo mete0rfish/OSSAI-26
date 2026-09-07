@@ -9,6 +9,7 @@ target_provider:
   request_timeout_seconds: 300
   temperature: 0.0
   max_output_tokens: 8192
+  context_window_tokens: 1048576
 
 optimizer_provider:
   kind: nvidia_nim
