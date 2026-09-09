@@ -70,6 +70,9 @@ def _gemini_generation_config(
 
 
 class GeminiProvider:
+    response_model = DisclosureAnswer
+    response_type = ProviderResponse
+
     def __init__(self, settings: ProviderSettings) -> None:
         assert settings.api_key_env is not None
         api_key = os.environ.get(settings.api_key_env)
@@ -83,23 +86,23 @@ class GeminiProvider:
         response = self.client.models.generate_content(
             model=self.settings.model,
             contents=request.prompt,
-            config=_gemini_generation_config(self.settings, DisclosureAnswer),
+            config=_gemini_generation_config(self.settings, self.response_model),
         )
         latency = time.monotonic() - started
         parsed = response.parsed
-        if isinstance(parsed, DisclosureAnswer):
+        if isinstance(parsed, self.response_model):
             result = parsed
         elif parsed is not None:
-            result = DisclosureAnswer.model_validate(parsed)
+            result = self.response_model.model_validate(parsed)
         else:
-            result = DisclosureAnswer.model_validate_json(response.text)
+            result = self.response_model.model_validate_json(response.text)
 
         metadata = getattr(response, "usage_metadata", None)
         usage = ModelUsage(
             input_tokens=getattr(metadata, "prompt_token_count", None),
             output_tokens=getattr(metadata, "candidates_token_count", None),
         )
-        return ProviderResponse(
+        return self.response_type(
             result=result,
             requested_model=self.settings.model,
             actual_model=getattr(response, "model_version", None) or self.settings.model,
@@ -281,6 +284,9 @@ def list_ollama_models(settings: ProviderSettings) -> list[str]:
 
 
 class OllamaProvider:
+    response_model = DisclosureAnswer
+    response_type = ProviderResponse
+
     def __init__(self, settings: ProviderSettings) -> None:
         self.settings = settings
         self.api_key = _ollama_api_key(settings)
@@ -289,11 +295,11 @@ class OllamaProvider:
         parsed, response, latency = _ollama_chat(
             self.settings,
             request.prompt,
-            DisclosureAnswer,
+            self.response_model,
             self.api_key,
         )
-        assert isinstance(parsed, DisclosureAnswer)
-        return ProviderResponse(
+        assert isinstance(parsed, self.response_model)
+        return self.response_type(
             result=parsed,
             requested_model=self.settings.model,
             actual_model=str(response.get("model") or self.settings.model),
@@ -422,6 +428,9 @@ def _nvidia_nim_chat(
 
 
 class NvidiaNimProvider:
+    response_model = DisclosureAnswer
+    response_type = ProviderResponse
+
     def __init__(self, settings: ProviderSettings) -> None:
         self.settings = settings
         self.api_key = _nvidia_nim_api_key(settings)
@@ -430,12 +439,12 @@ class NvidiaNimProvider:
         parsed, response, latency = _nvidia_nim_chat(
             self.settings,
             request.prompt,
-            DisclosureAnswer,
+            self.response_model,
             self.api_key,
         )
-        assert isinstance(parsed, DisclosureAnswer)
+        assert isinstance(parsed, self.response_model)
         usage = response.get("usage") or {}
-        return ProviderResponse(
+        return self.response_type(
             result=parsed,
             requested_model=self.settings.model,
             actual_model=str(response.get("model") or self.settings.model),
@@ -496,6 +505,9 @@ class NvidiaNimOptimizerProvider:
 class RecordedProvider:
     """`sample_id`로 저장된 구조화 답변을 재생한다."""
 
+    response_model = DisclosureAnswer
+    response_type = ProviderResponse
+
     def __init__(self, path: str | Path, model: str) -> None:
         self.model = model
         self.responses: dict[tuple[str, int], DisclosureAnswer] = {}
@@ -505,14 +517,14 @@ class RecordedProvider:
                     continue
                 row = json.loads(line)
                 key = (str(row["sample_id"]), int(row.get("attempt", 0)))
-                self.responses[key] = DisclosureAnswer.model_validate(row["response"])
+                self.responses[key] = self.response_model.model_validate(row["response"])
 
     def generate(self, request: GenerationRequest) -> ProviderResponse:
         started = time.monotonic()
         key = (request.sample_id, request.attempt)
         if key not in self.responses:
             raise KeyError(f"저장 응답이 없습니다: sample_id={key[0]}, attempt={key[1]}")
-        return ProviderResponse(
+        return self.response_type(
             result=self.responses[key],
             requested_model=self.model,
             actual_model=self.model,

@@ -1,0 +1,13 @@
+artifact_schema_version: 4
+provider:
+  kind: gemini
+  model: gemini-3.5-flash-lite
+  api_key_env: GEMINI_API_KEY
+  temperature: 0.0
+  max_output_tokens: 8192
+limits:
+  max_requests: 1
+  max_attempts: 1
+  max_wall_seconds: 180
+workflow:
+  max_html_bytes: 5000000

@@ -3,8 +3,9 @@
 LLM이 DART 공시에서 **정답을 찾고, 실제 원문을 근거로 제시하며, 답을 확정할 수 없을 때
 안전하게 보류하는지** 검증하는 로컬 평가 프로젝트다.
 
-이 프로젝트는 HTML 파서를 생성하거나 실행하지 않는다. 로컬 DART HTML과 질문을 모델에
-전달하고, 모델의 구조화된 답변을 결정론적인 Python 코드로 채점한다. 프롬프트 최적화,
+로컬 DART HTML과 질문을 모델에 전달하고, 모델의 구조화된 답변을 결정론적인 Python 코드로
+채점한다. 별도 명령으로 답·근거와 HTML 파싱용 Python 코드를 함께 생성할 수도 있다.
+생성 코드는 실행하지 않으며 문법·함수 형태만 검사한다. 프롬프트 최적화,
 다중 모델 비교, HTML 변형 기반 robustness 평가까지 하나의 재현 가능한 흐름으로 제공한다.
 권장 경로는 JSONL/artifact schema v3이며, 기존 YAML/artifact schema v2도 호환 목적으로 유지한다.
 
@@ -35,8 +36,8 @@ flowchart LR
     F --> H["HTML variants<br/>robustness 평가"]
 ```
 
-모델은 답 또는 프롬프트 후보만 생성한다. 점수 계산과 최종 프롬프트 선택은 항상 Python 코드가
-담당한다.
+평가 흐름에서 모델은 답 또는 프롬프트 후보만 생성한다. 점수 계산과 최종 프롬프트 선택은 항상
+Python 코드가 담당한다. 코드 생성 명령은 이 평가·선택 흐름과 별개다.
 
 | 설계 원칙 | 보장 내용 |
 | --- | --- |
@@ -68,7 +69,7 @@ Answerable 사례의 점수는 다음 네 조건으로 구성된다.
 
 1. 점수 채점 방식에 문제가 없는지 (AI Agent 관련 지식 부족)
 2. 문제풀이 및 프롬프트 개선 을 위한 AI 모델 선택의 어려움
-3. 현재 HTML에서 원하는 값을 응답하는 방식에 더해, 해당 응답을 파싱하는 코드를 생성하도록 확장할 계획인데 어떤 방식으로 더해나가야할지
+3. 답·파싱 코드 동시 생성은 지원하며, 생성 코드의 격리 실행·정확도·변형 HTML 재사용성 평가는 후속 과제다.
 4. 간단한 질문은 대체로 답을 구했지만, 공시 데이터가 법인마다 작성형식이 달라 이를 이해시키는데 한계 존재
 
 <br/>
@@ -200,6 +201,7 @@ submission 후보로 승격하지 않는다.
 | HTML 변형 생성 | `scripts/generate_html_variants.py` | 근거 보존·파괴 및 교란 변형 생성, 사람 검토표 출력 |
 | Robustness 평가 | `scripts/evaluate_html_robustness.py` | 보존 변형의 정답 유지와 파괴 변형의 안전 보류 확인 |
 | 기존 v2 평가 | `scripts/run_workflow.py` | YAML 기반 단일 답·근거 평가 흐름 유지 |
+| 답·파싱 코드 생성 | `scripts/generate_dart_parser.py` | HTML·질문에서 답·근거·Python 코드 생성, 실행 없이 정적 검사 |
 
 지원 provider는 `recorded`, Gemini, NVIDIA NIM, 로컬/Cloud Ollama다. Target과 optimizer를
 서로 다른 provider로 조합할 수 있다. Live 실행 전에는 `.env.example`을 복사하고 필요한 API 키를
@@ -212,6 +214,38 @@ cp .env.example .env
 
 모델별 설정과 실행 예시는 [다중 모델 benchmark 가이드](docs/multi-model-benchmark-guide.md)에
 정리되어 있다.
+
+## HTML·질문으로 답과 Python 파서 생성
+
+단일 HTML과 질문을 직접 받아 기존 답·근거 필드와 `python_code`를 반환한다.
+API 없는 recorded 예제:
+
+```bash
+uv run --locked python scripts/generate_dart_parser.py \
+  --html tests/fixtures/v3/dev-answer.html \
+  --question '2025년 개발 매출액은 얼마인가?' \
+  --config configs/parser-generation.recorded.yaml \
+  --output reports/parser-generation/recorded-$(date +%Y%m%d-%H%M%S)
+```
+
+실제 모델에는 `configs/parser-generation.gemini.yaml`을 사용하고
+`--authorize-external-transmission`을 추가한다. provider 설정을 바꾸면 Ollama와 NVIDIA NIM도
+사용할 수 있다. 이 플래그는 이번 HTML·질문의 모델 전송을 승인한다. 실제 전송은 사용자가
+승인한 데이터로만 실행한다. recorded 예제는 저장 응답을 재생하므로 임의의 질문을 해결하지 않는다.
+
+출력 디렉터리에는 `result.json`, `summary.json`, `calls.jsonl`과 `parser.py`가 저장된다.
+CLI도 답·코드가 포함된 JSON을 출력한다. 보류 시 `python_code=null`이며 `parser.py`를 만들지
+않는다. 입력 HTML은 프로젝트 내부 상대 경로여야 하며 `--html-sha256`으로 알려진 hash를
+검증할 수 있다. 기존 출력 디렉터리는 재사용하지 않는다.
+
+생성 함수의 계약은 `extract(html: str) -> str | None`이다. 질문별 조건으로 값을 추출하고
+값이나 문맥이 없거나 모호하면 `None`을 반환하도록 요청한다. 정적 검사는 Python 문법과
+`extract(html)` 진입점 형태만 확인한다. **코드 실행·안전성·정답 하드코딩 여부·재사용성을
+검증하지 않는다.** 검사 통과도 `code_execution_status=not_run`, `quality_status=inconclusive`로
+기록한다. 문법·진입점 또는 근거 검사 실패는 `quality_status=fail`이다.
+
+새 산출물은 `artifact_type=parser_generation`, schema v4를 사용한다. 기존 v2/v3 데이터·평가·선택
+계약은 유지하며, 생성된 코드와 원문에서 파생된 응답은 Git 제외 대상인 `reports/`에 보관한다.
 
 ## 데이터와 산출물
 
