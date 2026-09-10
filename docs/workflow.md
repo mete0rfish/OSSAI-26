@@ -331,3 +331,73 @@ reports/submission/<run-id>/
 정답, 개별 실패나 결과 수치는 새 후보 생성에 사용하지 않는다. 새 후보는 고정 프롬프트
 Development benchmark에서 baseline과 먼저 비교하고, 안전 조건을 통과한 경우에만 새로운
 Validation 실행 승인을 받는다.
+
+## 답·Python 코드 생성 (별도 schema v4 산출물)
+
+`scripts/generate_dart_parser.py`는 프로젝트 내부 HTML 상대 경로와 질문을 직접 받는다.
+v2/v3 평가를 대체하지 않으며 dataset, 기대 답, optimizer, selector를 입력으로 받지 않는다.
+평가용 공시를 이 명령으로 수동 탐색하는 경우에도 기존 split 격리를 지켜야 한다.
+Validation/Test의 결과를 후보 생성에 사용해서는 안 된다.
+
+질문은 공백·문장부호까지 원문 그대로 전달하고 저장한다. 이 명령의 HTML 전처리는 `raw`,
+`batch_questions_by_html`은 `false`로 고정한다. 생성 코드가 원본 DOM 속성을 참조할 수 있으므로
+compact HTML을 사용하지 않는다. 다른 전처리·batch 설정은 거부한다. provider에
+`context_window_tokens`가 있으면 기존 추정식으로 호출 전에 context 한도를 검사한다.
+
+```text
+HTML 경로·크기·인코딩·선택적 SHA-256 검증
+→ live 전송 승인 확인
+→ baseline QA 지시 + 코드 생성 계약 + 질문·HTML로 한 번 생성
+→ ParserAnswer 스키마 검사
+→ Python 문법·extract(html) 형태 + 기존 근거 존재 검사
+→ result.json / parser.py / summary.json / calls.jsonl 저장
+```
+
+QA 지시의 원본은 계속 `prompts/dart-qa-baseline.md`이다. 코드 생성 지시는 새 명령에만
+추가하며, 지원 placeholder는 `{question}`과 `{html}`뿐이다. 입력 문자열에 들어 있는
+placeholder 모양의 텍스트는 재치환하지 않는다. 기존 QA provider의 기본 응답 스키마는
+`DisclosureAnswer`로 유지한다. 새 provider는 동일 transport에 `ParserAnswer` 스키마를 적용한다.
+
+`ParserAnswer`는 기존 답·근거·confidence·보류 필드에 필수 `python_code: str | null`을 추가한다.
+일반 답변에는 공백이 아닌 최대 50,000자의 코드가 필요하며, 보류 시에는 정확한 기존 보류 계약과
+함께 `python_code=null`을 요구한다. 보류 상태와 일반 답변의 혼합은 거부한다.
+
+모델에는 Beautiful Soup와 Python 표준 라이브러리를 사용하는 동기 함수
+`extract(html: str) -> str | None`을 요청한다. 함수는 질문 조건을 코드에 담고 실행 시 HTML만
+받아야 한다. 대상 값이나 문맥이 없거나 후보가 모호하면 `None`을 반환한다. 정답·HTML 하드코딩,
+정답 자체로 검색, 파일·환경변수·네트워크·프로세스 접근, eval/exec를 사용하지 않도록 지시한다.
+이 제한은 생성 지시이며 자동으로 강제하는 보안 경계가 아니다.
+
+정적 검사기는 코드를 AST로 읽고 실행 없이 컴파일하여 문법을 검사한다. 최상위 동기 함수
+`extract` 하나, 필수 위치 인자 `html` 하나, 기본값·가변 인자·키워드 전용 인자·decorator·yield
+없음을 확인한다. 함수의 반환 타입, 실제 반환값, 모듈 실행 시 부작용이나 이름 재바인딩은
+검증하지 않는다. `valid`는 이 정적 검사의 통과만 뜻하며 안전한 실행이나 정확한 파싱을 뜻하지
+않는다. 새 명령에는 생성 코드를 import하거나 실행하는 경로가 없다.
+
+산출물의 역할:
+
+| 파일 | 내용 |
+| --- | --- |
+| `result.json` | schema v4, 질문, 답·근거·코드, 정적 검사, 근거 grounding, 모델·usage·계보 |
+| `parser.py` | 모델이 반환한 소스 그대로; 문법 오류가 있어도 검토용으로 보존, 보류 시 미생성 |
+| `summary.json` | 생성 완결성·품질의 한계·코드 미실행 상태 |
+| `calls.jsonl` | 기존 호출 ledger 형식의 hash·usage·시간·모델 정보; 코드·전체 HTML·질문 미기록 |
+
+계보에는 원본 HTML bytes, 렌더링한 프롬프트, 응답 JSON 스키마, 생성 코드의 SHA-256과 Git
+commit·dirty 상태를 기록한다. checker hash는 `parser_code.py`, `evaluation.py`, `html_utils.py`,
+`parser_generation.py`의 파일 내용을 해당 순서로 이어 붙여 계산한다. 이 산출물은 기존
+optimization/robustness lineage의 입력으로 사용하지 않는다.
+
+생성이 끝나면 `observed_status=complete`다. 정적 검사 또는 답·인용 grounding 실패는
+`quality_status=fail`이며, 나머지는 정답을 평가하지 않았으므로 `inconclusive`다. 코드의
+`execution_status`와 요약의 `code_execution_status`는 항상 `not_run`, 코드 `correctness`는 항상
+`inconclusive`다. `pass`나 기존 QA strict 점수는 부여하지 않는다.
+
+초기화 실패는 `not_run`, 호출 이후 오류·예산 초과는 `partial`로 저장하며 이미 받은 응답을
+보존한다. provider 예외에는 HTML이나 비밀값이 포함될 수 있어 메시지 대신 예외 클래스명만
+저장한다. 입력 검증·전송 승인·기존 출력 경로 검사는 provider 호출 전에 실패한다. CLI 종료
+코드 0은 생성 완료 및 정적 검사에서 알려진 실패가 없음을 뜻하며, 파싱 정확도 보증은 아니다.
+
+후속 격리 실행 평가에서는 QA 점수와 파서 점수를 분리하고, 동일 생성 코드를 고정한 채
+사람이 검토한 값 변경·문맥 삭제·구조 변형 HTML에 실행해야 한다. 현재 robustness 명령의
+변형별 모델 재호출은 이 검증을 대신하지 않는다.

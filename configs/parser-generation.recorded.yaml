@@ -1,0 +1,13 @@
+artifact_schema_version: 4
+provider:
+  kind: recorded
+  model: recorded-parser
+  recorded_responses: tests/fixtures/parser-generation-response.jsonl
+  temperature: 0.0
+  max_output_tokens: 8192
+limits:
+  max_requests: 1
+  max_attempts: 1
+  max_wall_seconds: 120
+workflow:
+  max_html_bytes: 5000000

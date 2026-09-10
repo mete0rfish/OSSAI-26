@@ -122,6 +122,22 @@ class SelectionSettings(SettingsModel):
     min_mean_improvement: float = Field(default=0.01, ge=0)
 
 
+class ParserWorkflowSettings(WorkflowSettings):
+    """생성 파서가 원본 속성을 참조할 수 있도록 단일 raw HTML만 사용한다."""
+
+    html_preprocessing: Literal["raw"] = "raw"
+    batch_questions_by_html: Literal[False] = False
+
+
+class ParserGenerationSettings(SettingsModel):
+    """단일 HTML의 답·코드 생성 전용 설정. v2/v3 평가 설정과 분리한다."""
+
+    artifact_schema_version: Literal[4] = 4
+    provider: ProviderSettings
+    workflow: ParserWorkflowSettings = Field(default_factory=ParserWorkflowSettings)
+    limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
+
+
 class DatasetRequirements(SettingsModel):
     split_counts: dict[Literal["development", "validation", "test"], int] = Field(
         default_factory=dict
